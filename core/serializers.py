@@ -1,0 +1,193 @@
+# serializers.py
+from rest_framework import serializers
+from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
+from django.core.exceptions import ValidationError
+from django.utils import timezone
+from .models import User, Chat, Message, MessageType, PromptParameters, PromptTemplate, PromptHistory, MediaGenerationTask, UserRole
+from .utils import validate_email_domain, next_question_for_chat, QUESTIONS_FLOW
+
+class UserSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = ["id", "email", "fullName", "role", "dateJoined", "isActive"]
+        read_only_fields = ["id", "role", "dateJoined", "isActive"]
+
+class UserRegistrationSerializer(serializers.ModelSerializer):
+    password = serializers.CharField(write_only=True, min_length=8)
+    passwordConfirm = serializers.CharField(write_only=True)
+
+    class Meta:
+        model = User
+        fields = ["id", "email", "fullName", "password", "passwordConfirm"]
+        read_only_fields = ["id"]
+
+    def validate_email(self, value):
+        if User.objects.filter(email__iexact=value).exists():
+            raise serializers.ValidationError("Пользователь с таким email уже существует")
+        if not validate_email_domain(value):
+            raise serializers.ValidationError("Домен email не поддерживается")
+        return value.lower()
+
+    def validate(self, attrs):
+        if attrs.get("password") != attrs.pop("passwordConfirm", None):
+            raise serializers.ValidationError({"passwordConfirm": "Пароли не совпадают"})
+        return attrs
+
+    def create(self, validated_data):
+        password = validated_data.pop("password")
+        user = User.objects.create_user(password=password, **validated_data)
+        return user
+
+class UserUpdateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = ["id", "email", "fullName", "role", "isActive"]
+        read_only_fields = ["id", "email"]
+
+    def validate_role(self, value):
+        if self.instance and self.instance.role == UserRole.ADMIN and value != UserRole.ADMIN:
+            # Не позволяем снимать права администратора у самого себя
+            if self.instance == self.context['request'].user:
+                raise serializers.ValidationError("Нельзя снять права администратора у себя")
+        return value
+
+class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
+    @classmethod
+    def get_token(cls, user):
+        token = super().get_token(user)
+        token["email"] = user.email
+        token["role"] = user.role
+        return token
+
+    def validate(self, attrs):
+        data = super().validate(attrs)
+        data["user"] = {"id": self.user.id, "email": self.user.email, "fullName": self.user.fullName, "role": self.user.role}
+        return data
+
+class MessageSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Message
+        fields = ["id", "chat", "content", "messageType", "createdAt"]
+        read_only_fields = ["id", "createdAt"]
+
+class ChatSerializer(serializers.ModelSerializer):
+    messages = MessageSerializer(many=True, read_only=True)
+    messageCount = serializers.SerializerMethodField()
+    lastMessage = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Chat
+        fields = ["id", "user", "title", "createdAt", "updatedAt", "isActive", "is_temporary", "flow_step", "messages", "messageCount", "lastMessage"]
+        read_only_fields = ["id", "user", "createdAt", "updatedAt", "messages", "messageCount", "lastMessage", "flow_step", "is_temporary"]
+
+    def get_messageCount(self, obj):
+        return obj.messages.count()
+
+    def get_lastMessage(self, obj):
+        last = obj.messages.order_by("-createdAt").first()
+        if not last:
+            return None
+        return MessageSerializer(last).data
+
+class ChatCreateSerializer(serializers.ModelSerializer):
+    initialMessage = serializers.CharField(write_only=True, required=False)
+
+    class Meta:
+        model = Chat
+        fields = ["id", "title", "initialMessage"]
+
+    def validate_title(self, value):
+        if value is None or not str(value).strip():
+            user = self.context["request"].user
+            chat_count = Chat.objects.filter(user=user).count() + 1
+            return f"Чат №{chat_count}"
+        return value
+
+    def validate(self, attrs):
+        request = self.context.get("request")
+        user = request.user
+        
+        # Проверяем наличие незавершенного чата (с flow_step < общего количества вопросов)
+        unfinished_chats = Chat.objects.filter(
+            user=user, 
+            isActive=True,
+            flow_step__lt=len(QUESTIONS_FLOW)  # Чат не завершен
+        ).exists()
+        
+        if unfinished_chats:
+            raise ValidationError("У вас есть незавершённый чат. Завершите его перед созданием нового.")
+        return attrs
+
+    def create(self, validated_data):
+        initial_message = validated_data.pop("initialMessage", None)
+        request = self.context.get("request")
+        user = request.user
+        
+        # Создаем чат (теперь он не временный, а обычный)
+        chat = Chat.objects.create(
+            user=user, 
+            is_temporary=False,  # Теперь обычный чат
+            **validated_data
+        )
+        
+        # Создаем первый системный вопрос
+        key, question_text, optional = next_question_for_chat(chat)
+        if question_text:
+            Message.objects.create(
+                chat=chat, 
+                content=question_text, 
+                messageType=MessageType.SYSTEM
+            )
+        
+        # Если есть начальное сообщение от пользователя, создаем его
+        if initial_message:
+            Message.objects.create(
+                chat=chat,
+                content=initial_message,
+                messageType=MessageType.USER
+            )
+            
+        return chat
+
+class AdminChatSerializer(ChatSerializer):
+    user_email = serializers.EmailField(source='user.email', read_only=True)
+    user_fullName = serializers.CharField(source='user.fullName', read_only=True)
+
+    class Meta(ChatSerializer.Meta):
+        fields = ChatSerializer.Meta.fields + ['user_email', 'user_fullName']
+
+class PromptTemplateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PromptTemplate
+        fields = ["id", "name", "template", "is_active", "createdAt", "updatedAt"]
+        read_only_fields = ["id", "createdAt", "updatedAt"]
+
+class PromptParametersSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PromptParameters
+        fields = ["id", "user", "data", "semantic_vector", "createdAt"]
+        read_only_fields = ["id", "user", "semantic_vector", "createdAt"]
+
+class PromptAssembleSerializer(serializers.Serializer):
+    prompt_parameters_id = serializers.UUIDField(required=False)
+    parameters = serializers.JSONField(required=False)
+    template_id = serializers.UUIDField(required=False)
+
+    def validate(self, attrs):
+        if not attrs.get('prompt_parameters_id') and not attrs.get('parameters'):
+            raise serializers.ValidationError("Необходимо указать либо prompt_parameters_id, либо parameters")
+        return attrs
+
+class PromptHistorySerializer(serializers.ModelSerializer):
+    prompt_template_name = serializers.CharField(source='prompt_template.name', read_only=True)
+
+    class Meta:
+        model = PromptHistory
+        fields = ["id", "user", "prompt_template", "prompt_template_name", "parameters", "assembled_prompt", "createdAt"]
+        read_only_fields = ["id", "user", "createdAt"]
+
+class MediaGenerationTaskSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = MediaGenerationTask
+        fields = ["id", "user", "chat", "prompt_history", "prompt_text", "status", "result_url", "attempts", "last_error", "createdAt", "updatedAt"]
+        read_only_fields = ["id", "user", "createdAt", "updatedAt"]
