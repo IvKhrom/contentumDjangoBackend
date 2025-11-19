@@ -140,7 +140,7 @@ class PromptHistory(models.Model):
 class MediaGenerationTask(models.Model):
     class Status(models.TextChoices):
         PENDING = "PENDING", "В ожидании"
-        RUNNING = "RUNNING", "Выполняется"
+        RUNNING = "RUNNING", "Выполняется" 
         SUCCESS = "SUCCESS", "Успешно"
         FAILED = "FAILED", "Ошибка"
     
@@ -151,6 +151,7 @@ class MediaGenerationTask(models.Model):
     prompt_text = models.TextField(verbose_name="Текст промпта")
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING, verbose_name="Статус")
     result_url = models.URLField(blank=True, null=True, verbose_name="URL результата")
+    result_image_base64 = models.TextField(blank=True, null=True, verbose_name="Изображение (Base64)")  # НОВОЕ ПОЛЕ
     attempts = models.IntegerField(default=0, verbose_name="Попытки")
     last_error = models.TextField(blank=True, null=True, verbose_name="Последняя ошибка")
     createdAt = models.DateTimeField(default=timezone.now, verbose_name="Дата создания")

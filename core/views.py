@@ -19,7 +19,7 @@ from .utils import (
     assemble_prompt_from_template, simple_semantic_vector_from_params, 
     enrich_prompt_with_gigachat, quality_check_generated, 
     handle_user_message_and_advance, paraphrase_prompt, get_default_prompt_template,
-    get_unfinished_chat
+    get_empty_chat
 )
 
 class StandardResultsSetPagination(PageNumberPagination):
@@ -177,20 +177,22 @@ class ChatViewSet(viewsets.ModelViewSet):
         }, status=status.HTTP_201_CREATED)
 
     @action(detail=False, methods=["get"])
-    def unfinished(self, request):
-        chat = get_unfinished_chat(request.user)
+    def empty(self, request):
+        """Проверка наличия пустых чатов"""
+      
+        chat = get_empty_chat(request.user)
         
         if chat:
             serializer = self.get_serializer(chat)
             return Response({
                 "status": "success",
-                "message": "Найден незавершенный чат",
+                "message": "Найден чат без пользовательских сообщений",
                 "data": serializer.data
             })
         else:
             return Response({
                 "status": "success",
-                "message": "Нет незавершенных чатов",
+                "message": "Нет чатов без пользовательских сообщений",
                 "data": None
             })
 
@@ -203,6 +205,65 @@ class ChatViewSet(viewsets.ModelViewSet):
         return self.get_paginated_response(ser.data) if page is not None else Response({
             "status": "success", 
             "data": ser.data
+        })
+    
+    @action(detail=True, methods=['get'])
+    def generation_status(self, request, pk=None):
+        """Проверка статуса генерации для чата"""
+        chat = self.get_object()
+        
+        # Ищем последнюю задачу генерации для этого чата
+        task = MediaGenerationTask.objects.filter(chat=chat).order_by('-createdAt').first()
+        
+        if not task:
+            return Response({
+                "status": "success",
+                "data": {
+                    "generation_status": "no_task",
+                    "message": "Задача генерации не найдена"
+                }
+            })
+        
+        return Response({
+            "status": "success",
+            "data": {
+                "generation_status": task.status,
+                "task_id": str(task.id),
+                "has_image": bool(task.result_image_base64),
+                "last_error": task.last_error,
+                "created_at": task.createdAt,
+                "updated_at": task.updatedAt
+            }
+        })
+    
+    @action(detail=True, methods=['get'])
+    def generated_images(self, request, pk=None):
+        """Получение всех сгенерированных изображений для чата"""
+        chat = self.get_object()
+        
+        tasks = MediaGenerationTask.objects.filter(
+            chat=chat, 
+            status=MediaGenerationTask.Status.SUCCESS
+        ).order_by('-createdAt')
+        
+        images_data = []
+        for task in tasks:
+            if task.result_image_base64:
+                images_data.append({
+                    "task_id": str(task.id),
+                    "prompt": task.prompt_text,
+                    "created_at": task.createdAt,
+                    "image_url": f"/api/generation-tasks/{task.id}/image/",
+                    "download_url": f"/api/generation-tasks/{task.id}/image/?format=file"
+                })
+        
+        return Response({
+            "status": "success",
+            "data": {
+                "chat_id": str(chat.id),
+                "images_count": len(images_data),
+                "images": images_data
+            }
         })
 
 class MessageViewSet(viewsets.ModelViewSet):
@@ -256,17 +317,31 @@ class MessageViewSet(viewsets.ModelViewSet):
                         "system_message": MessageSerializer(sys_msg).data
                     }
                 }, status=status.HTTP_201_CREATED)
-            else:
+            
+            elif result["type"] == "completed":
                 pp = result.get("prompt_parameters")
                 ph = result.get("prompt_history")
+                
+                # ✅ ИСПРАВЛЕНО: Добавляем информацию о задаче генерации
+                task = MediaGenerationTask.objects.filter(
+                    prompt_history=ph, 
+                    chat=msg.chat
+                ).order_by('-createdAt').first()
+                
+                response_data = {
+                    "prompt_parameters_id": pp.id, 
+                    "prompt_history_id": ph.id,
+                    "assembled_prompt": ph.assembled_prompt,
+                    # ✅ ДОБАВЛЯЕМ ИНФОРМАЦИЮ ДЛЯ ПОЛУЧЕНИЯ ИЗОБРАЖЕНИЯ
+                    "generation_task_id": task.id if task else None,
+                    "image_url": f"/api/generation-tasks/{task.id}/image/" if task else None,
+                    "message": "Генерация запущена. Изображение будет доступно через несколько секунд."
+                }
+                
                 return Response({
                     "status": "success", 
-                    "message": "Flow завершён, параметры собраны", 
-                    "data": {
-                        "prompt_parameters_id": pp.id, 
-                        "prompt_history_id": ph.id,
-                        "assembled_prompt": ph.assembled_prompt
-                    }
+                    "message": "Flow завершён, запущена генерация изображения", 
+                    "data": response_data
                 }, status=status.HTTP_201_CREATED)
 
         return Response({
@@ -484,3 +559,76 @@ class PromptActionsViewSet(viewsets.ViewSet):
             "message": "Не удалось сгенерировать подходящий результат", 
             "data": {"task_id": task.id}
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+from django.http import HttpResponse
+import base64
+import re
+
+class MediaGenerationTaskViewSet(viewsets.ReadOnlyModelViewSet):
+    serializer_class = MediaGenerationTaskSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        user = self.request.user
+        if user.role == UserRole.ADMIN:
+            return MediaGenerationTask.objects.all()
+        return MediaGenerationTask.objects.filter(user=user)
+
+    @action(detail=True, methods=['get'])
+    def image(self, request, pk=None):
+        """Получение изображения в формате Base64 или как файл"""
+        task = self.get_object()
+        
+        if not task.result_image_base64:
+            return Response({
+                "status": "error",
+                "message": "Изображение еще не готово или произошла ошибка генерации"
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        # Определяем формат ответа
+        response_format = request.query_params.get('format', 'json')
+        
+        if response_format == 'file':
+            # ✅ ПЕРЕНАПРАВЛЯЕМ НА МЕТОД download_image
+            return self.download_image(request, pk)
+        else:
+            # Возвращаем как JSON с Base64
+            return Response({
+                "status": "success",
+                "data": {
+                    "image_base64": task.result_image_base64,
+                    "task_id": str(task.id),
+                    "prompt": task.prompt_text,
+                    "created_at": task.createdAt,
+                    # ✅ ОБНОВЛЯЕМ URL ДЛЯ СКАЧИВАНИЯ
+                    "download_url": f"http://{request.get_host()}/api/generation-tasks/{task.id}/download/"
+                }
+            })
+    
+    @action(detail=True, methods=['get'], url_path='download')
+    def download_image(self, request, pk=None):
+        """Скачивание изображения как файла"""
+        task = self.get_object()
+        
+        if not task.result_image_base64:
+            return Response({
+                "status": "error",
+                "message": "Изображение не найдено"
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        try:
+            # Убираем data:image/... префикс если есть
+            image_data = task.result_image_base64
+            if 'base64,' in image_data:
+                image_data = image_data.split('base64,')[1]
+            
+            image_binary = base64.b64decode(image_data)
+            response = HttpResponse(image_binary, content_type='image/png')
+            response['Content-Disposition'] = f'attachment; filename="generated_image_{task.id}.png"'
+            return response
+        except Exception as e:
+            return Response({
+                "status": "error",
+                "message": f"Ошибка декодирования изображения: {str(e)}"
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

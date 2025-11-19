@@ -4,7 +4,7 @@ from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from django.core.exceptions import ValidationError
 from django.utils import timezone
 from .models import User, Chat, Message, MessageType, PromptParameters, PromptTemplate, PromptHistory, MediaGenerationTask, UserRole
-from .utils import validate_email_domain, next_question_for_chat, QUESTIONS_FLOW
+from .utils import validate_email_domain, next_question_for_chat, QUESTIONS_FLOW, has_empty_chat
 
 class UserSerializer(serializers.ModelSerializer):
     class Meta:
@@ -107,15 +107,11 @@ class ChatCreateSerializer(serializers.ModelSerializer):
         request = self.context.get("request")
         user = request.user
         
-        # Проверяем наличие незавершенного чата (с flow_step < общего количества вопросов)
-        unfinished_chats = Chat.objects.filter(
-            user=user, 
-            isActive=True,
-            flow_step__lt=len(QUESTIONS_FLOW)  # Чат не завершен
-        ).exists()
+        # проверяем наличие чата без пользовательских сообщений
         
-        if unfinished_chats:
-            raise ValidationError("У вас есть незавершённый чат. Завершите его перед созданием нового.")
+        if has_empty_chat(user):
+            raise ValidationError("У вас есть чат без сообщений. Напишите хотя бы одно сообщение в существующем чате перед созданием нового.")
+        
         return attrs
 
     def create(self, validated_data):
@@ -123,10 +119,10 @@ class ChatCreateSerializer(serializers.ModelSerializer):
         request = self.context.get("request")
         user = request.user
         
-        # Создаем чат (теперь он не временный, а обычный)
+        # Создаем чат
         chat = Chat.objects.create(
             user=user, 
-            is_temporary=False,  # Теперь обычный чат
+            is_temporary=False,
             **validated_data
         )
         
@@ -187,7 +183,13 @@ class PromptHistorySerializer(serializers.ModelSerializer):
         read_only_fields = ["id", "user", "createdAt"]
 
 class MediaGenerationTaskSerializer(serializers.ModelSerializer):
+    result_image_base64 = serializers.CharField(read_only=True, allow_null=True)
+    
     class Meta:
         model = MediaGenerationTask
-        fields = ["id", "user", "chat", "prompt_history", "prompt_text", "status", "result_url", "attempts", "last_error", "createdAt", "updatedAt"]
+        fields = [
+            "id", "user", "chat", "prompt_history", "prompt_text", 
+            "status", "result_url", "result_image_base64",
+            "attempts", "last_error", "createdAt", "updatedAt"
+        ]
         read_only_fields = ["id", "user", "createdAt", "updatedAt"]

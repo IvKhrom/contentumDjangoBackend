@@ -134,3 +134,8 @@ SWAGGER_SETTINGS = {
     },
     'USE_SESSION_AUTH': False,
 }
+
+# Kandinsky settings
+KANDINSKY_API_KEY = os.getenv('KANDINSKY_API_KEY', '')
+KANDINSKY_SECRET_KEY = os.getenv('KANDINSKY_SECRET_KEY', '')
+KANDINSKY_BASE_URL = os.getenv('KANDINSKY_BASE_URL', 'https://api-key.fusionbrain.ai/')

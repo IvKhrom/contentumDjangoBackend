@@ -5,6 +5,8 @@ from django.core.serializers.json import DjangoJSONEncoder
 from .models import Message, Chat, PromptParameters, PromptHistory, MessageType
 from string import Formatter
 import re
+from .kandinsky_service import kandinsky_service
+from .models import Message, MediaGenerationTask
 
 # Flow вопросов согласно документу "Параметры + промпт.docx"
 QUESTIONS_FLOW = [
@@ -24,7 +26,6 @@ QUESTIONS_FLOW = [
     ("duration", "Длительность в секундах (duration) — для видео.", True),
     ("slogan", "Текст/слоган, если нужен (slogan).", True),
     ("text_style", "Стиль текста (text_style).", True),
-    ("variation_count", "Сколько вариантов нужно (variation_count).", True),
 ]
 
 FLOW_KEYS = [k for k, _, _ in QUESTIONS_FLOW]
@@ -124,19 +125,226 @@ def build_parameters_from_chat_messages(chat: Chat) -> dict:
     
     return params
 
+def assemble_optimized_prompt(parameters: dict) -> str:
+    """
+    Сборка оптимизированного промпта для Kandinsky
+    """
+    parts = []
+    
+    # Базовая информация
+    content_type = parameters.get('content_type', 'контент')
+    platform = parameters.get('platform', '')
+    aspect_ratio = parameters.get('aspect_ratio', '')
+    duration = parameters.get('duration', '')
+    
+    # Первая строка
+    first_line = f"{content_type} для {platform}" if platform else content_type
+    if aspect_ratio:
+        first_line += f" в формате {aspect_ratio}"
+    if duration and content_type == 'видео':
+        first_line += f", длительность {duration} секунд"
+    parts.append(first_line + ".")
+    
+    # Стиль и эмоции
+    style_parts = []
+    if parameters.get('visual_style'):
+        style_parts.append(f"Стиль: {parameters['visual_style']}")
+    if parameters.get('emotion'):
+        style_parts.append(f"Эмоция: {parameters['emotion']}")
+    if style_parts:
+        parts.append(". ".join(style_parts) + ".")
+    
+    # Идея
+    if parameters.get('idea'):
+        parts.append(f"Идея: {parameters['idea']}.")
+    
+    # Композиция и визуал
+    visual_parts = []
+    if parameters.get('composition_focus'):
+        visual_parts.append(f"Фокус на {parameters['composition_focus']}")
+    if parameters.get('color_palette'):
+        visual_parts.append(f"Цвета: {parameters['color_palette']}")
+    if parameters.get('visual_associations'):
+        visual_parts.append(f"Ассоциации: {parameters['visual_associations']}")
+    
+    if visual_parts:
+        parts.append(" ".join(visual_parts) + ".")
+    
+    # Событие (только если указано)
+    event_name = parameters.get('event_name', '').strip()
+    event_genre = parameters.get('event_genre', '').strip()
+    event_description = parameters.get('event_description', '').strip()
+    
+    if event_name or event_genre or event_description:
+        event_parts = []
+        if event_name:
+            event_parts.append(f"Событие: {event_name}")
+        if event_genre:
+            event_parts.append(f"Жанр: {event_genre}")
+        if event_description:
+            event_parts.append(f"Описание: {event_description}")
+        
+        parts.append(" | ".join(event_parts) + ".")
+    
+    # Слоган (только если указан)
+    slogan = parameters.get('slogan', '').strip()
+    text_style = parameters.get('text_style', '').strip()
+    
+    if slogan:
+        slogan_phrase = f'Текст: "{slogan}"'
+        if text_style:
+            slogan_phrase += f" в стиле {text_style}"
+        parts.append(slogan_phrase + ".")
+    
+    # Финальная строка
+    if platform:
+        parts.append(f"Современно и эстетично для {platform}.")
+    else:
+        parts.append("Современный и эстетичный контент.")
+    
+    # Собираем все части
+    final_prompt = " ".join(parts)
+    
+    # Обеспечиваем, что промпт не превышает лимит
+    return optimize_prompt_for_kandinsky(final_prompt)
+
+def optimize_prompt_for_kandinsky(prompt_text, max_length=800):
+    """
+    Оптимизация промпта для Kandinsky API (макс. 1000 символов)
+    """
+    if len(prompt_text) <= max_length:
+        return prompt_text
+    
+    # Сначала убираем лишние пробелы
+    optimized = ' '.join(prompt_text.split())
+    
+    if len(optimized) <= max_length:
+        return optimized
+    
+    # Если все еще длинный, ищем хорошее место для обрезки
+    # Предпочитаем обрезать после точки или запятой
+    cut_point = optimized[:max_length].rfind('.')
+    if cut_point == -1:
+        cut_point = optimized[:max_length].rfind(',')
+    if cut_point == -1:
+        cut_point = optimized[:max_length].rfind(' ')
+    
+    if cut_point > max_length * 0.6:  # Если нашли хорошее место для обрезки
+        optimized = optimized[:cut_point + 1]
+    else:
+        # Просто обрезаем по границе слова
+        optimized = optimized[:max_length]
+    
+    return optimized
+
+def complete_chat_and_generate(chat, prompt_history):
+    """
+    Завершает чат и запускает генерацию изображения
+    """
+    print(f"🔧 UTILS DEBUG: Starting complete_chat_and_generate")
+    print(f"🔧 UTILS DEBUG: Chat ID: {chat.id}")
+    print(f"🔧 UTILS DEBUG: Prompt History ID: {prompt_history.id}")
+    print(f"🔧 UTILS DEBUG: Assembled prompt: {prompt_history.assembled_prompt[:100]}...")
+  
+    # Создаем задачу генерации
+    task = MediaGenerationTask.objects.create(
+        user=chat.user,
+        chat=chat,
+        prompt_history=prompt_history,
+        prompt_text=prompt_history.assembled_prompt,
+        status=MediaGenerationTask.Status.PENDING
+    )
+    
+    print(f"🔧 UTILS DEBUG: Task created: {task.id}")
+    
+    # Отправляем системное сообщение о начале генерации
+    Message.objects.create(
+        chat=chat,
+        content="🎨 Запускаю генерацию изображения... Это может занять 1-2 минуты.",
+        messageType=MessageType.SYSTEM
+    )
+    
+    print(f"🔧 UTILS DEBUG: Calling kandinsky_service.generate_image...")
+    
+    # Запускаем генерацию
+    generation_result = kandinsky_service.generate_image(
+        prompt=prompt_history.assembled_prompt,
+        width=1024,
+        height=1024,
+        style="DEFAULT",
+        negative_prompt="низкое качество, размытое, watermark"
+    )
+    
+    print(f"🔧 UTILS DEBUG: Kandinsky result keys: {generation_result.keys()}")
+    print(f"🔧 UTILS DEBUG: Kandinsky success: {generation_result.get('success')}")
+    
+    if generation_result["success"]:
+        task.status = MediaGenerationTask.Status.SUCCESS
+        images_data = generation_result.get("images_data", [])
+        
+        print(f"🔧 UTILS DEBUG: Images data received: {len(images_data)} images")
+        
+        # ✅ ИСПРАВЛЕНО: Сохраняем изображение
+        if images_data and len(images_data) > 0:
+            # Берем первое изображение из массива
+            task.result_image_base64 = images_data[0]
+            task.save()
+            
+            print(f"🔧 UTILS DEBUG: Image saved to task, length: {len(images_data[0])}")
+            
+            # ✅ СООБЩАЕМ ПОЛЬЗОВАТЕЛЮ КАК ПОЛУЧИТЬ ИЗОБРАЖЕНИЕ
+            preview_msg = f"✅ Генерация завершена! Изображение готово.\n\n📥 Вы можете получить его по ссылке:\nhttp://localhost:8000/api/generation-tasks/{task.id}/image/\n\n💾 Или скачать как файл:\nhttp://localhost:8000/api/generation-tasks/{task.id}/download/"
+        else:
+            print(f"🔧 UTILS DEBUG: No images data in result!")
+            preview_msg = "✅ Генерация завершена, но изображение не получено."
+        
+        Message.objects.create(
+            chat=chat,
+            content=preview_msg,
+            messageType=MessageType.SYSTEM
+        )
+        
+        print(f"🔧 UTILS DEBUG: Generation completed successfully")
+        
+        return {
+            "success": True,
+            "images_data": images_data,
+            "task_id": task.id
+        }
+    else:
+        task.status = MediaGenerationTask.Status.FAILED
+        task.last_error = generation_result["error"]
+        task.save()
+        
+        print(f"🔧 UTILS DEBUG: Generation failed: {generation_result['error']}")
+        
+        # Отправляем сообщение об ошибке
+        error_msg = generation_result["error"]
+        if "1000 characters" in error_msg:
+            error_msg = "Промпт слишком длинный для генерации. Попробуйте более краткие описания."
+        
+        Message.objects.create(
+            chat=chat,
+            content=f"❌ Произошла ошибка при генерации: {error_msg}",
+            messageType=MessageType.SYSTEM
+        )
+        
+        return {
+            "success": False,
+            "error": generation_result["error"],
+            "task_id": task.id
+        }
+
+
 def handle_user_message_and_advance(chat: Chat, message: Message):
     """
-    Обработчик пользовательского сообщения:
-    - обновляет flow_step,
-    - создаёт следующий системный вопрос,
-    - если flow завершён — собирает PromptParameters и PromptHistory
+    Обработчик пользовательского сообщения с автоматической генерацией после завершения
     """
     from django.utils import timezone
     
     # Увеличиваем шаг
     chat.flow_step = (chat.flow_step or 0) + 1
     chat.updatedAt = timezone.now()
-    
     chat.save(update_fields=["flow_step", "updatedAt"])
 
     # Проверяем, есть ли следующий вопрос
@@ -154,10 +362,10 @@ def handle_user_message_and_advance(chat: Chat, message: Message):
     params = build_parameters_from_chat_messages(chat)
     
     # Обогащаем короткие параметры через GigaChat
-    enrich_keys = ["idea", "visual_associations"]
-    for key in enrich_keys:
-        if key in params and isinstance(params[key], str) and 0 < len(params[key]) < 80:
-            params[key] = enrich_prompt_with_gigachat(params[key])
+    #enrich_keys = ["idea", "visual_associations"]
+    #for key in enrich_keys:
+    #    if key in params and isinstance(params[key], str) and 0 < len(params[key]) < 80:
+    #        params[key] = enrich_prompt_with_gigachat(params[key])
     
     # Сохраняем параметры
     pp = PromptParameters.objects.create(
@@ -166,9 +374,11 @@ def handle_user_message_and_advance(chat: Chat, message: Message):
         semantic_vector=simple_semantic_vector_from_params(params)
     )
     
-    # Создаем запись в истории промптов
+    # СОБИРАЕМ ОПТИМИЗИРОВАННЫЙ ПРОМПТ
+    assembled_prompt = assemble_optimized_prompt(params)
+    
+    # Получаем шаблон для истории (но не используем его для генерации)
     template = get_default_prompt_template()
-    assembled_prompt = assemble_prompt_from_template(template.template, params) if template else ""
     
     ph = PromptHistory.objects.create(
         user=chat.user, 
@@ -177,7 +387,15 @@ def handle_user_message_and_advance(chat: Chat, message: Message):
         assembled_prompt=assembled_prompt
     )
     
-    return {"type": "completed", "prompt_parameters": pp, "prompt_history": ph}
+    # ЗАПУСКАЕМ ГЕНЕРАЦИЮ АВТОМАТИЧЕСКИ
+    generation_result = complete_chat_and_generate(chat, ph)
+    
+    # ВОЗВРАЩАЕМ ТОЛЬКО ДАННЫЕ О ПРОМПТАХ
+    return {
+        "type": "completed", 
+        "prompt_parameters": pp, 
+        "prompt_history": ph
+    }
 
 def get_default_prompt_template():
     """Получение активного шаблона промпта с созданием дефолтного если нет активных"""
@@ -209,15 +427,28 @@ def get_user_chats_summary(user):
         "total_messages": Message.objects.filter(chat__user=user).count()
     }
 
-def has_unfinished_chat(user):
+def has_empty_chat(user):
     """
-    Проверяет, есть ли у пользователя незавершенный чат
+    Проверяет, есть ли у пользователя чат без пользовательских сообщений
     """
     return Chat.objects.filter(
         user=user, 
-        isActive=True,
-        flow_step__lt=len(QUESTIONS_FLOW)  # Чат не завершен
+        isActive=True
+    ).exclude(
+        messages__messageType=MessageType.USER
     ).exists()
+
+def get_empty_chat(user):
+    """
+    Возвращает чат без пользовательских сообщений, если есть
+    """
+    chats_without_user_messages = Chat.objects.filter(
+        user=user, 
+        isActive=True
+    ).exclude(
+        messages__messageType=MessageType.USER
+    )
+    return chats_without_user_messages.first()
 
 def get_unfinished_chat(user):
     """
