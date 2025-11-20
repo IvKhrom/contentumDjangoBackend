@@ -7,7 +7,7 @@ from django.shortcuts import get_object_or_404
 from rest_framework.pagination import PageNumberPagination
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import OrderingFilter, SearchFilter
-
+from .permissions import PublicDownloadPermission
 from .models import User, Chat, Message, UserRole, MessageType, PromptTemplate, PromptParameters, PromptHistory, MediaGenerationTask, AuditLog
 from .serializers import (
     UserSerializer, UserRegistrationSerializer, UserUpdateSerializer,
@@ -588,13 +588,35 @@ import re
 
 class MediaGenerationTaskViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = MediaGenerationTaskSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [PublicDownloadPermission]
 
     def get_queryset(self):
         user = self.request.user
-        if user.role == UserRole.ADMIN:
-            return MediaGenerationTask.objects.all()
-        return MediaGenerationTask.objects.filter(user=user)
+        
+        # Если пользователь авторизован - стандартная логика
+        if user.is_authenticated:
+            if hasattr(user, 'role') and user.role == UserRole.ADMIN:
+                return MediaGenerationTask.objects.all()
+            return MediaGenerationTask.objects.filter(user=user)
+        
+        # Если пользователь не авторизован - проверяем URL
+        else:
+            # Получаем UUID из URL параметров
+            task_id = self.kwargs.get('pk')
+            
+            # Если в URL есть UUID задачи - разрешаем доступ только к этой задаче
+            if task_id:
+                try:
+                    # Пробуем найти задачу по UUID
+                    task = MediaGenerationTask.objects.get(id=task_id)
+                    # Возвращаем queryset только с этой задачей
+                    return MediaGenerationTask.objects.filter(id=task_id)
+                except MediaGenerationTask.DoesNotExist:
+                    # Если задача не найдена - возвращаем пустой queryset
+                    return MediaGenerationTask.objects.none()
+            
+            # Если нет UUID в URL - возвращаем пустой queryset
+            return MediaGenerationTask.objects.none()
 
     @action(detail=True, methods=['get'], url_path='image')
     def image_json(self, request, pk=None):

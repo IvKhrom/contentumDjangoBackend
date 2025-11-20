@@ -18,14 +18,25 @@ class JWTAuthenticationMiddleware(MiddlewareMixin):
             "/swagger.json",
             "/favicon.ico",
         ]
+        
+        # Префиксы для динамических путей
+        public_prefixes = [
+            "/api/generation-tasks/",
+        ]
 
-        # Проверяем точное совпадение или начало пути
-        if any(request.path == path or request.path.startswith(path) for path in public_paths):
+        # Проверяем, является ли путь публичным
+        is_public = (
+            any(request.path == path or request.path.startswith(path) for path in public_paths) or
+            any(request.path.startswith(prefix) and 
+               (request.path.endswith('/download/') or request.path.endswith('/image/') or request.path.endswith('/image-file/'))
+               for prefix in public_prefixes) or
+            request.method == "OPTIONS"
+        )
+
+        if is_public:
             return None
 
-        if request.method == "OPTIONS":
-            return None
-
+        # Только для защищенных путей выполняем аутентификацию
         jwt_auth = JWTAuthentication()
         try:
             auth_result = jwt_auth.authenticate(request)
