@@ -322,27 +322,48 @@ class MessageViewSet(viewsets.ModelViewSet):
                 pp = result.get("prompt_parameters")
                 ph = result.get("prompt_history")
                 
-                # ✅ ИСПРАВЛЕНО: Добавляем информацию о задаче генерации
+                # Получаем задачу генерации
                 task = MediaGenerationTask.objects.filter(
                     prompt_history=ph, 
                     chat=msg.chat
                 ).order_by('-createdAt').first()
                 
-                response_data = {
-                    "prompt_parameters_id": pp.id, 
-                    "prompt_history_id": ph.id,
-                    "assembled_prompt": ph.assembled_prompt,
-                    # ✅ ДОБАВЛЯЕМ ИНФОРМАЦИЮ ДЛЯ ПОЛУЧЕНИЯ ИЗОБРАЖЕНИЯ
-                    "generation_task_id": task.id if task else None,
-                    "image_url": f"/api/generation-tasks/{task.id}/image/" if task else None,
-                    "message": "Генерация запущена. Изображение будет доступно через несколько секунд."
-                }
+                base_url = f"http://{request.get_host()}"
                 
-                return Response({
-                    "status": "success", 
-                    "message": "Flow завершён, запущена генерация изображения", 
-                    "data": response_data
-                }, status=status.HTTP_201_CREATED)
+                if task and task.result_image_base64:
+                    # ✅ ФОТО ГОТОВО - ВОЗВРАЩАЕМ ССЫЛКИ ДЛЯ МГНОВЕННОГО ПОЛУЧЕНИЯ
+                    response_data = {
+                        "prompt_parameters_id": str(pp.id) if pp else None, 
+                        "prompt_history_id": str(ph.id) if ph else None,
+                        "assembled_prompt": ph.assembled_prompt if ph else None,
+                        "generation_task_id": str(task.id) if task else None,
+                        # ✅ ССЫЛКА ДЛЯ МГНОВЕННОГО ПОКАЗА ФОТО
+                        "instant_image_url": f"{base_url}/api/generation-tasks/{task.id}/image-file/",
+                        "download_url": f"{base_url}/api/generation-tasks/{task.id}/download/",
+                        "status": "completed",
+                        "message": "✅ Генерация завершена! Ваше фото готово."
+                    }
+                    
+                    return Response({
+                        "status": "success", 
+                        "message": "Flow завершён, изображение сгенерировано", 
+                        "data": response_data
+                    }, status=status.HTTP_201_CREATED)
+                
+                else:
+                    # Если изображение еще не готово
+                    return Response({
+                        "status": "success", 
+                        "message": "Flow завершён, генерация запущена", 
+                        "data": {
+                            "prompt_parameters_id": str(pp.id) if pp else None,
+                            "prompt_history_id": str(ph.id) if ph else None,
+                            "assembled_prompt": ph.assembled_prompt if ph else None,
+                            "generation_task_id": str(task.id) if task else None,
+                            "status": "generating",
+                            "message": "🔄 Генерация изображения в процессе..."
+                        }
+                    }, status=status.HTTP_201_CREATED)
 
         return Response({
             "status": "success", 
@@ -575,9 +596,9 @@ class MediaGenerationTaskViewSet(viewsets.ReadOnlyModelViewSet):
             return MediaGenerationTask.objects.all()
         return MediaGenerationTask.objects.filter(user=user)
 
-    @action(detail=True, methods=['get'])
-    def image(self, request, pk=None):
-        """Получение изображения в формате Base64 или как файл"""
+    @action(detail=True, methods=['get'], url_path='image')
+    def image_json(self, request, pk=None):
+        """Получение изображения в формате JSON с Base64"""
         task = self.get_object()
         
         if not task.result_image_base64:
@@ -586,26 +607,47 @@ class MediaGenerationTaskViewSet(viewsets.ReadOnlyModelViewSet):
                 "message": "Изображение еще не готово или произошла ошибка генерации"
             }, status=status.HTTP_404_NOT_FOUND)
         
-        # Определяем формат ответа
-        response_format = request.query_params.get('format', 'json')
+        # Возвращаем как JSON с Base64
+        return Response({
+            "status": "success",
+            "data": {
+                "image_base64": task.result_image_base64,
+                "task_id": str(task.id),
+                "prompt": task.prompt_text,
+                "created_at": task.createdAt,
+                "download_url": f"http://{request.get_host()}/api/generation-tasks/{task.id}/download/",
+                "preview_url": f"http://{request.get_host()}/api/generation-tasks/{task.id}/image-file/"
+            }
+        })
+
+    @action(detail=True, methods=['get'], url_path='image-file')
+    def image_file(self, request, pk=None):
+        """Получение изображения как файла для мгновенного показа"""
+        task = self.get_object()
         
-        if response_format == 'file':
-            # ✅ ПЕРЕНАПРАВЛЯЕМ НА МЕТОД download_image
-            return self.download_image(request, pk)
-        else:
-            # Возвращаем как JSON с Base64
+        if not task.result_image_base64:
             return Response({
-                "status": "success",
-                "data": {
-                    "image_base64": task.result_image_base64,
-                    "task_id": str(task.id),
-                    "prompt": task.prompt_text,
-                    "created_at": task.createdAt,
-                    # ✅ ОБНОВЛЯЕМ URL ДЛЯ СКАЧИВАНИЯ
-                    "download_url": f"http://{request.get_host()}/api/generation-tasks/{task.id}/download/"
-                }
-            })
-    
+                "status": "error",
+                "message": "Изображение еще не готово или произошла ошибка генерации"
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        import base64
+        try:
+            image_data = task.result_image_base64
+            if 'base64,' in image_data:
+                image_data = image_data.split('base64,')[1]
+            
+            image_binary = base64.b64decode(image_data)
+            response = HttpResponse(image_binary, content_type='image/png')
+            # ✅ 'inline' для показа в браузере
+            response['Content-Disposition'] = f'inline; filename="generated_image_{task.id}.png"'
+            return response
+        except Exception as e:
+            return Response({
+                "status": "error",
+                "message": f"Ошибка декодирования изображения: {str(e)}"
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
     @action(detail=True, methods=['get'], url_path='download')
     def download_image(self, request, pk=None):
         """Скачивание изображения как файла"""
@@ -618,7 +660,6 @@ class MediaGenerationTaskViewSet(viewsets.ReadOnlyModelViewSet):
             }, status=status.HTTP_404_NOT_FOUND)
         
         try:
-            # Убираем data:image/... префикс если есть
             image_data = task.result_image_base64
             if 'base64,' in image_data:
                 image_data = image_data.split('base64,')[1]

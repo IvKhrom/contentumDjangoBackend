@@ -8,24 +8,23 @@ import re
 from .kandinsky_service import kandinsky_service
 from .models import Message, MediaGenerationTask
 
-# Flow вопросов согласно документу "Параметры + промпт.docx"
 QUESTIONS_FLOW = [
-    ("content_type", "Что нужно создать — фото или видео? (content_type)", False),
-    ("idea", "Кратко опишите идею или цель контента (idea)", False),
-    ("emotion", "Какой эмоциональный тон нужен? (energy/nostalgic/романтичный/и т.д.)", False),
-    ("relation_to_event", "Нужно ли привязать к событию? (прямая / тематическая / без привязки)", True),
-    ("event_name", "Если да — укажите название события (event_name). Оставьте пустым, если нет.", True),
-    ("event_genre", "Жанр события (event_genre).", True),
-    ("event_description", "Краткое описание события (event_description).", True),
-    ("visual_style", "Художественный стиль (visual_style).", False),
-    ("composition_focus", "На что сделать акцент композиции (composition_focus).", False),
-    ("color_palette", "Преобладающая палитра (color_palette).", True),
-    ("visual_associations", "Слова-ассоциации (visual_associations). Несколько слов через запятую.", True),
-    ("platform", "Платформа для публикации (platform).", True),
-    ("aspect_ratio", "Формат кадра (aspect_ratio). Например 9:16, 1:1, 16:9.", True),
-    ("duration", "Длительность в секундах (duration) — для видео.", True),
-    ("slogan", "Текст/слоган, если нужен (slogan).", True),
-    ("text_style", "Стиль текста (text_style).", True),
+    #("content_type", "Что нужно создать — фото или видео? (content_type)", False),
+    ("idea", "Кратко опишите идею или цель контента (например: 'Концертный зал на постановке')", False),
+    #("emotion", "Какой эмоциональный тон нужен? (energy/nostalgic/романтичный/и т.д.)", False),
+    #("relation_to_event", "Нужно ли привязать к событию? (прямая / тематическая / без привязки)", True),
+    ("event_name", "Введите название постановки.", True),
+    ("event_genre", "Укажите жанр (мюзикл, драма, комедия и т.д.).", True),
+    #("event_description", "Краткое описание события (event_description).", True),
+    ("visual_style", "Выберите художественный стиль (реализм, минимализм, арт-деко, неон, сюрреализм...).", False),
+    ("composition_focus", "Что в центре композиции? (человек, сцена, предмет, абстракция, пейзаж)", False),
+    ("color_palette", "Какая цветовая палитра преобладает? (тёплая, холодная и т.п.)", True),
+    ("visual_associations", "Назови несколько слов-ассоциаций (например: “огни сцены, движение, свет прожекторов”)", True),
+    ("platform", "Где будет опубликовано? (VK, YouTube Shorts, digital screen и т.д.)", True),
+    ("aspect_ratio", "Выберите формат кадра (9:16, 1:1, 16:9)", True),
+    #("duration", "Длительность в секундах (duration) — для видео.", True),
+    #("slogan", "Текст/слоган, если нужен (slogan).", True),
+    #("text_style", "Стиль текста (text_style).", True),
 ]
 
 FLOW_KEYS = [k for k, _, _ in QUESTIONS_FLOW]
@@ -132,25 +131,25 @@ def assemble_optimized_prompt(parameters: dict) -> str:
     parts = []
     
     # Базовая информация
-    content_type = parameters.get('content_type', 'контент')
+    #content_type = parameters.get('content_type', 'контент')
     platform = parameters.get('platform', '')
     aspect_ratio = parameters.get('aspect_ratio', '')
-    duration = parameters.get('duration', '')
+    #duration = parameters.get('duration', '')
     
     # Первая строка
-    first_line = f"{content_type} для {platform}" if platform else content_type
+    first_line = f"Фото для {platform}" if platform else "Фото"
     if aspect_ratio:
         first_line += f" в формате {aspect_ratio}"
-    if duration and content_type == 'видео':
-        first_line += f", длительность {duration} секунд"
+    #if duration and content_type == 'видео':
+    #    first_line += f", длительность {duration} секунд"
     parts.append(first_line + ".")
     
     # Стиль и эмоции
     style_parts = []
     if parameters.get('visual_style'):
         style_parts.append(f"Стиль: {parameters['visual_style']}")
-    if parameters.get('emotion'):
-        style_parts.append(f"Эмоция: {parameters['emotion']}")
+    #if parameters.get('emotion'):
+    #    style_parts.append(f"Эмоция: {parameters['emotion']}")
     if style_parts:
         parts.append(". ".join(style_parts) + ".")
     
@@ -173,28 +172,28 @@ def assemble_optimized_prompt(parameters: dict) -> str:
     # Событие (только если указано)
     event_name = parameters.get('event_name', '').strip()
     event_genre = parameters.get('event_genre', '').strip()
-    event_description = parameters.get('event_description', '').strip()
+    #event_description = parameters.get('event_description', '').strip()
     
-    if event_name or event_genre or event_description:
+    if event_name or event_genre: #or event_description:
         event_parts = []
         if event_name:
             event_parts.append(f"Событие: {event_name}")
         if event_genre:
             event_parts.append(f"Жанр: {event_genre}")
-        if event_description:
-            event_parts.append(f"Описание: {event_description}")
+        #if event_description:
+        #    event_parts.append(f"Описание: {event_description}")
         
         parts.append(" | ".join(event_parts) + ".")
     
     # Слоган (только если указан)
-    slogan = parameters.get('slogan', '').strip()
-    text_style = parameters.get('text_style', '').strip()
+    #slogan = parameters.get('slogan', '').strip()
+    #text_style = parameters.get('text_style', '').strip()
     
-    if slogan:
-        slogan_phrase = f'Текст: "{slogan}"'
-        if text_style:
-            slogan_phrase += f" в стиле {text_style}"
-        parts.append(slogan_phrase + ".")
+    #if slogan:
+    #    slogan_phrase = f'Текст: "{slogan}"'
+    #    if text_style:
+    #        slogan_phrase += f" в стиле {text_style}"
+    #    parts.append(slogan_phrase + ".")
     
     # Финальная строка
     if platform:
@@ -292,8 +291,11 @@ def complete_chat_and_generate(chat, prompt_history):
             
             print(f"🔧 UTILS DEBUG: Image saved to task, length: {len(images_data[0])}")
             
-            # ✅ СООБЩАЕМ ПОЛЬЗОВАТЕЛЮ КАК ПОЛУЧИТЬ ИЗОБРАЖЕНИЕ
-            preview_msg = f"✅ Генерация завершена! Изображение готово.\n\n📥 Вы можете получить его по ссылке:\nhttp://localhost:8000/api/generation-tasks/{task.id}/image/\n\n💾 Или скачать как файл:\nhttp://localhost:8000/api/generation-tasks/{task.id}/download/"
+            # ✅ ОБНОВЛЕНО: Сообщение со ссылками для скачивания
+            download_url = f"http://localhost:8000/api/generation-tasks/{task.id}/download/"
+            preview_url = f"http://localhost:8000/api/generation-tasks/{task.id}/image/?format=file"
+            
+            preview_msg = f"✅ Генерация завершена! Ваше фото готово.\n\n📥 Скачайте его по ссылке:\n{download_url}\n\n👀 Или просмотрите:\n{preview_url}"
         else:
             print(f"🔧 UTILS DEBUG: No images data in result!")
             preview_msg = "✅ Генерация завершена, но изображение не получено."

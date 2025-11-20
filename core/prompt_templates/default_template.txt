@@ -1,4 +1,4 @@
-{content_type} для {platform} в формате {aspect_ratio}. {duration_phrase}
+Фото для {platform} в формате {aspect_ratio}.
 Стиль: {visual_style}. Эмоция: {emotion}. Идея: {idea}.
 
 Основной фокус: {composition_focus}. 
@@ -6,6 +6,6 @@
 Ассоциации: {visual_associations}.
 
 {event_phrase}
-{slogan_phrase}
+
 
 Современно, эстетично, гармонично для {platform}.

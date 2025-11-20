@@ -20,7 +20,5 @@ urlpatterns = [
     path("", include(router.urls)),
     path("auth/login/", CustomTokenObtainPairView.as_view(), name="token_obtain_pair"),
     path("auth/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
-    path("generation-tasks/<uuid:pk>/download/", 
-         MediaGenerationTaskViewSet.as_view({'get': 'download_image'}), 
-         name="generation-task-download"),
+
 ]
