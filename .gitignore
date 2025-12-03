@@ -11,3 +11,4 @@ __pycache__/
 *.swp
 migrations/__pycache__/
 core/management/commands/__pycache__/
+*.pt

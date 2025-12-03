@@ -37,10 +37,10 @@ class KandinskyService:
         except Exception as e:
             logger.error(f"Pipeline error: {str(e)}")
             return None
-
+    
     def generate_image(self, prompt, width=1024, height=1024, style=None, negative_prompt=None):
         """
-        Генерация изображения через Kandinsky API
+        Генерация изображения через Kandinsky API с улучшенными параметрами качества
         """
         try:
             # Получаем pipeline_id
@@ -51,7 +51,10 @@ class KandinskyService:
                     "error": "Не удалось получить доступную модель для генерации"
                 }
 
-            # Подготавливаем параметры согласно документации
+            print(f"🎨 KANDINSKY DEBUG: Generating {width}x{height} image")
+            print(f"🎨 KANDINSKY DEBUG: Prompt: {prompt[:100]}...")
+
+            # Улучшенные параметры для качества
             params = {
                 "type": "GENERATE",
                 "numImages": 1,
@@ -65,8 +68,13 @@ class KandinskyService:
             # Добавляем опциональные параметры
             if style:
                 params["style"] = style
+            
+            # Улучшенный negative prompt для борьбы с аномалиями
+            enhanced_negative_prompt = "низкое качество, размытое, blurry, pixelated, deformed, distorted, bad anatomy, extra fingers, missing fingers, fused fingers, too many fingers, bad hands, extra limbs, malformed limbs, missing limbs, disconnected limbs, mutation"
             if negative_prompt:
-                params["negativePromptDecoder"] = negative_prompt
+                enhanced_negative_prompt += f", {negative_prompt}"
+            
+            params["negativePromptDecoder"] = enhanced_negative_prompt
 
             # Подготавливаем данные для multipart/form-data
             files = {
@@ -79,17 +87,16 @@ class KandinskyService:
                 self.base_url + 'key/api/v1/pipeline/run',
                 headers=self.auth_headers,
                 files=files,
-                timeout=30
+                timeout=60  # Увеличиваем таймаут для качественной генерации
             )
 
-            # Принимаем как 200, так и 201 статус как успешные
             if response.status_code in [200, 201]:
                 data = response.json()
                 task_id = data.get('uuid')
                 
                 if task_id:
                     # Ждем завершения генерации
-                    result = self.check_generation_status(task_id)
+                    result = self.check_generation_status(task_id, max_attempts=40, delay=7)
                     return result
                 else:
                     return {
@@ -110,6 +117,7 @@ class KandinskyService:
                 "error": str(e)
             }
 
+    
     def check_generation_status(self, task_id, max_attempts=30, delay=5):
         """
         Проверка статуса генерации с ожиданием

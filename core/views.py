@@ -321,6 +321,7 @@ class MessageViewSet(viewsets.ModelViewSet):
             elif result["type"] == "completed":
                 pp = result.get("prompt_parameters")
                 ph = result.get("prompt_history")
+                generation_result = result.get("generation_result", {})  # ⬅️ получаем результат
                 
                 # Получаем задачу генерации
                 task = MediaGenerationTask.objects.filter(
@@ -331,27 +332,40 @@ class MessageViewSet(viewsets.ModelViewSet):
                 base_url = f"http://{request.get_host()}"
                 
                 if task and task.result_image_base64:
-                    # ✅ ФОТО ГОТОВО - ВОЗВРАЩАЕМ ССЫЛКИ ДЛЯ МГНОВЕННОГО ПОЛУЧЕНИЯ
+                    # Получаем информацию о перегенерациях из generation_result
+                    regeneration_attempts = generation_result.get("regeneration_attempts", 0)
+                    total_attempts = generation_result.get("attempts", 1)
+                    
+                    # ✅ ФОТО ГОТОВО - ВОЗВРАЩАЕМ ССЫЛКИ
                     response_data = {
                         "prompt_parameters_id": str(pp.id) if pp else None, 
                         "prompt_history_id": str(ph.id) if ph else None,
                         "assembled_prompt": ph.assembled_prompt if ph else None,
                         "generation_task_id": str(task.id) if task else None,
-                        # ✅ ССЫЛКА ДЛЯ МГНОВЕННОГО ПОКАЗА ФОТО
                         "instant_image_url": f"{base_url}/api/generation-tasks/{task.id}/image-file/",
                         "download_url": f"{base_url}/api/generation-tasks/{task.id}/download/",
                         "status": "completed",
-                        "message": "✅ Генерация завершена! Ваше фото готово."
+                        "message": "✅ Генерация завершена! Ваше фото готово.",
+                        "regeneration_attempts": regeneration_attempts,  # ⬅️ из generation_result
+                        "total_attempts": total_attempts  # ⬅️ общее количество попыток
                     }
+                    
+                    # Обновляем сообщение если были перегенерации
+                    if regeneration_attempts > 0:
+                        problems = generation_result.get("problems", [])
+                        problems_text = ", ".join([p.split(": ", 1)[-1] for p in problems[-3:]]) if problems else "технические проблемы"
+                        response_data["message"] = f"✅ Генерация завершена после {regeneration_attempts} перегенераций (исправлено: {problems_text})"
                     
                     return Response({
                         "status": "success", 
                         "message": "Flow завершён, изображение сгенерировано", 
                         "data": response_data
                     }, status=status.HTTP_201_CREATED)
-                
                 else:
                     # Если изображение еще не готово
+                    regeneration_attempts = generation_result.get("regeneration_attempts", 0)
+                    total_attempts = generation_result.get("attempts", 1)
+                    
                     return Response({
                         "status": "success", 
                         "message": "Flow завершён, генерация запущена", 
@@ -360,11 +374,13 @@ class MessageViewSet(viewsets.ModelViewSet):
                             "prompt_history_id": str(ph.id) if ph else None,
                             "assembled_prompt": ph.assembled_prompt if ph else None,
                             "generation_task_id": str(task.id) if task else None,
+                            "regeneration_attempts": regeneration_attempts,
+                            "total_attempts": total_attempts,
                             "status": "generating",
-                            "message": "🔄 Генерация изображения в процессе..."
+                            "message": f"🔄 Генерация изображения в процессе... (попыток: {total_attempts})"
                         }
                     }, status=status.HTTP_201_CREATED)
-
+                
         return Response({
             "status": "success", 
             "message": "Сообщение отправлено", 

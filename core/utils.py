@@ -1,12 +1,10 @@
-# utils.py
-import json
 from datetime import datetime, timedelta
 from django.core.serializers.json import DjangoJSONEncoder
 from .models import Message, Chat, PromptParameters, PromptHistory, MessageType
 from string import Formatter
-import re
 from .kandinsky_service import kandinsky_service
 from .models import Message, MediaGenerationTask
+from .detection.photo_checker import photo_checker
 
 QUESTIONS_FLOW = [
     #("content_type", "Что нужно создать — фото или видео? (content_type)", False),
@@ -125,15 +123,12 @@ def build_parameters_from_chat_messages(chat: Chat) -> dict:
     return params
 
 def assemble_optimized_prompt(parameters: dict) -> str:
-    """
-    Сборка оптимизированного промпта для Kandinsky
-    """
     parts = []
     
     # Базовая информация
     #content_type = parameters.get('content_type', 'контент')
     platform = parameters.get('platform', '')
-    aspect_ratio = parameters.get('aspect_ratio', '')
+    aspect_ratio = parameters.get('aspect_ratio', '1:1')
     #duration = parameters.get('duration', '')
     
     # Первая строка
@@ -174,7 +169,7 @@ def assemble_optimized_prompt(parameters: dict) -> str:
     event_genre = parameters.get('event_genre', '').strip()
     #event_description = parameters.get('event_description', '').strip()
     
-    if event_name or event_genre: #or event_description:
+    if event_name or event_genre:
         event_parts = []
         if event_name:
             event_parts.append(f"Событие: {event_name}")
@@ -184,7 +179,7 @@ def assemble_optimized_prompt(parameters: dict) -> str:
         #    event_parts.append(f"Описание: {event_description}")
         
         parts.append(" | ".join(event_parts) + ".")
-    
+
     # Слоган (только если указан)
     #slogan = parameters.get('slogan', '').strip()
     #text_style = parameters.get('text_style', '').strip()
@@ -237,104 +232,66 @@ def optimize_prompt_for_kandinsky(prompt_text, max_length=800):
     return optimized
 
 def complete_chat_and_generate(chat, prompt_history):
-    """
-    Завершает чат и запускает генерацию изображения
-    """
-    print(f"🔧 UTILS DEBUG: Starting complete_chat_and_generate")
-    print(f"🔧 UTILS DEBUG: Chat ID: {chat.id}")
-    print(f"🔧 UTILS DEBUG: Prompt History ID: {prompt_history.id}")
-    print(f"🔧 UTILS DEBUG: Assembled prompt: {prompt_history.assembled_prompt[:100]}...")
-  
-    # Создаем задачу генерации
-    task = MediaGenerationTask.objects.create(
-        user=chat.user,
-        chat=chat,
-        prompt_history=prompt_history,
-        prompt_text=prompt_history.assembled_prompt,
-        status=MediaGenerationTask.Status.PENDING
-    )
+    # Получаем параметры для определения aspect ratio
+    parameters = build_parameters_from_chat_messages(chat)
+    aspect_ratio = parameters.get('aspect_ratio', '1:1')
     
-    print(f"🔧 UTILS DEBUG: Task created: {task.id}")
-    
-    # Отправляем системное сообщение о начале генерации
+    # Рассчитываем размеры
+    width, height = calculate_dimensions(aspect_ratio)
+        
+    # Отправляем системное сообщение с информацией о размерах
     Message.objects.create(
         chat=chat,
-        content="🎨 Запускаю генерацию изображения... Это может занять 1-2 минуты.",
+        content=f"🎨 Запускаю генерацию изображения ({width}x{height}) с автоматической проверкой качества...",
         messageType=MessageType.SYSTEM
     )
     
-    print(f"🔧 UTILS DEBUG: Calling kandinsky_service.generate_image...")
-    
-    # Запускаем генерацию
-    generation_result = kandinsky_service.generate_image(
-        prompt=prompt_history.assembled_prompt,
-        width=1024,
-        height=1024,
-        style="DEFAULT",
-        negative_prompt="низкое качество, размытое, watermark"
+    # Используем новую функцию с проверкой
+    generation_result = check_and_regenerate_image(
+        chat=chat,
+        prompt_history=prompt_history,
+        original_prompt=prompt_history.assembled_prompt,
+        width=width,
+        height=height,
+        max_retries=3
     )
     
-    print(f"🔧 UTILS DEBUG: Kandinsky result keys: {generation_result.keys()}")
-    print(f"🔧 UTILS DEBUG: Kandinsky success: {generation_result.get('success')}")
-    
     if generation_result["success"]:
-        task.status = MediaGenerationTask.Status.SUCCESS
-        images_data = generation_result.get("images_data", [])
+        task = generation_result["task"]
         
-        print(f"🔧 UTILS DEBUG: Images data received: {len(images_data)} images")
+        # ✅ ОБНОВЛЕНО: Сообщение со ссылками для скачивания
+        base_url = "http://localhost:8000"  # В реальном коде должен быть из настроек
+        download_url = f"{base_url}/api/generation-tasks/{task.id}/download/"
+        preview_url = f"{base_url}/api/generation-tasks/{task.id}/image-file/"
         
-        # ✅ ИСПРАВЛЕНО: Сохраняем изображение
-        if images_data and len(images_data) > 0:
-            # Берем первое изображение из массива
-            task.result_image_base64 = images_data[0]
-            task.save()
-            
-            print(f"🔧 UTILS DEBUG: Image saved to task, length: {len(images_data[0])}")
-            
-            # ✅ ОБНОВЛЕНО: Сообщение со ссылками для скачивания
-            download_url = f"http://localhost:8000/api/generation-tasks/{task.id}/download/"
-            preview_url = f"http://localhost:8000/api/generation-tasks/{task.id}/image/?format=file"
-            
-            preview_msg = f"✅ Генерация завершена! Ваше фото готово.\n\n📥 Скачайте его по ссылке:\n{download_url}\n\n👀 Или просмотрите:\n{preview_url}"
-        else:
-            print(f"🔧 UTILS DEBUG: No images data in result!")
-            preview_msg = "✅ Генерация завершена, но изображение не получено."
+        attempts_info = ""
+        regeneration_attempts = max(0, generation_result.get("attempts", 1) - 1)
+        if regeneration_attempts > 0:
+            attempts_info = f" (перегенераций: {regeneration_attempts})"
+        
+        preview_msg = f"✅ Генерация завершена{attempts_info}!\n\n"
+        preview_msg += f"📥 Скачайте фото по ссылке:\n{download_url}\n\n"
+        preview_msg += f"👀 Или просмотрите:\n{preview_url}"
         
         Message.objects.create(
             chat=chat,
             content=preview_msg,
             messageType=MessageType.SYSTEM
         )
-        
-        print(f"🔧 UTILS DEBUG: Generation completed successfully")
-        
+       
         return {
             "success": True,
-            "images_data": images_data,
-            "task_id": task.id
+            "task_id": task.id,
+            "attempts": generation_result["attempts"],
+            "regeneration_attempts": regeneration_attempts,  # ⬅️ добавляем перегенерации
+            "problems": generation_result.get("problems", [])
         }
     else:
-        task.status = MediaGenerationTask.Status.FAILED
-        task.last_error = generation_result["error"]
-        task.save()
-        
-        print(f"🔧 UTILS DEBUG: Generation failed: {generation_result['error']}")
-        
-        # Отправляем сообщение об ошибке
-        error_msg = generation_result["error"]
-        if "1000 characters" in error_msg:
-            error_msg = "Промпт слишком длинный для генерации. Попробуйте более краткие описания."
-        
-        Message.objects.create(
-            chat=chat,
-            content=f"❌ Произошла ошибка при генерации: {error_msg}",
-            messageType=MessageType.SYSTEM
-        )
-        
         return {
             "success": False,
-            "error": generation_result["error"],
-            "task_id": task.id
+            "error": generation_result.get("error", "Unknown error"),
+            "attempts": generation_result.get("attempts", 0),
+            "regeneration_attempts": max(0, generation_result.get("attempts", 0) - 1)
         }
 
 
@@ -363,12 +320,6 @@ def handle_user_message_and_advance(chat: Chat, message: Message):
     # Flow завершён — собираем параметры
     params = build_parameters_from_chat_messages(chat)
     
-    # Обогащаем короткие параметры через GigaChat
-    #enrich_keys = ["idea", "visual_associations"]
-    #for key in enrich_keys:
-    #    if key in params and isinstance(params[key], str) and 0 < len(params[key]) < 80:
-    #        params[key] = enrich_prompt_with_gigachat(params[key])
-    
     # Сохраняем параметры
     pp = PromptParameters.objects.create(
         user=chat.user, 
@@ -386,17 +337,19 @@ def handle_user_message_and_advance(chat: Chat, message: Message):
         user=chat.user, 
         prompt_template=template,
         parameters=pp, 
+ 
         assembled_prompt=assembled_prompt
     )
     
     # ЗАПУСКАЕМ ГЕНЕРАЦИЮ АВТОМАТИЧЕСКИ
     generation_result = complete_chat_and_generate(chat, ph)
     
-    # ВОЗВРАЩАЕМ ТОЛЬКО ДАННЫЕ О ПРОМПТАХ
+    # ВОЗВРАЩАЕМ ДАННЫЕ С ИНФОРМАЦИЕЙ О ПЕРЕГЕНЕРАЦИЯХ
     return {
         "type": "completed", 
         "prompt_parameters": pp, 
-        "prompt_history": ph
+        "prompt_history": ph,
+        "generation_result": generation_result  # ⬅️ добавляем полный результат
     }
 
 def get_default_prompt_template():
@@ -462,6 +415,24 @@ def get_unfinished_chat(user):
         flow_step__lt=len(QUESTIONS_FLOW)
     ).first()
 
+def calculate_dimensions(aspect_ratio_str):
+    """
+    Расчет размеров изображения на основе aspect ratio
+    """
+    if aspect_ratio_str == "9:16":
+        return 768, 1365  # Instagram portrait
+    elif aspect_ratio_str == "16:9":
+        return 1920, 1080  # Landscape
+    elif aspect_ratio_str == "1:1":
+        return 1024, 1024  # Square
+    elif aspect_ratio_str == "4:5":
+        return 1080, 1350  # Facebook/Instagram vertical
+    elif aspect_ratio_str == "2:3":
+        return 1200, 1800  # Portrait
+    else:
+        # По умолчанию квадрат
+        return 1024, 1024
+
 def cleanup_expired_temporary_chats(minutes=10):
     """
     Удаляет временные чаты, созданные больше minutes назад и у которых нет пользовательских ответов.
@@ -504,3 +475,134 @@ def paraphrase_prompt(prompt_text):
     # Простая эвристика - выбираем парафраз на основе длины промпта
     index = min(len(prompt_text) // 50, len(paraphrases) - 1)
     return prompt_text + paraphrases[index]
+
+
+def check_and_regenerate_image(chat, prompt_history, original_prompt, width=1024, height=1024, max_retries=3):
+    """
+    Проверяет сгенерированное фото и при необходимости перегенерирует
+    """
+    attempts = 0
+    problems_history = []
+    
+    print(f"🔧 UTILS DEBUG: Generating image with dimensions: {width}x{height}")
+    
+    while attempts < max_retries:
+        attempts += 1
+        
+        # Создаем задачу генерации
+        task = MediaGenerationTask.objects.create(
+            user=chat.user,
+            chat=chat,
+            prompt_history=prompt_history,
+            prompt_text=original_prompt if attempts == 1 else prompt_history.assembled_prompt,
+            status=MediaGenerationTask.Status.PENDING
+        )
+        
+        # Генерируем изображение с правильными размерами
+        generation_result = kandinsky_service.generate_image(
+            prompt=original_prompt if attempts == 1 else prompt_history.assembled_prompt,
+            width=width,
+            height=height,  # ⬅️ используем переданные размеры
+            style="DEFAULT",
+            negative_prompt="низкое качество, размытое, watermark, deformed, distorted, bad anatomy, extra fingers, missing fingers"
+        )
+        
+        if not generation_result["success"]:
+            task.status = MediaGenerationTask.Status.FAILED
+            task.last_error = generation_result["error"]
+            task.save()
+            
+            Message.objects.create(
+                chat=chat,
+                content=f"❌ Ошибка при генерации (попытка {attempts}): {generation_result['error']}",
+                messageType=MessageType.SYSTEM
+            )
+            continue
+        
+        # Получаем сгенерированное изображение
+        images_data = generation_result.get("images_data", [])
+        if not images_data:
+            task.status = MediaGenerationTask.Status.FAILED
+            task.last_error = "Нет данных изображения"
+            task.save()
+            continue
+        
+        image_base64 = images_data[0]
+        
+        # Проверяем фото
+        check_result = photo_checker.check_photo(image_base64)
+        
+        if check_result["passed"]:
+            # Фото прошло проверку
+            task.status = MediaGenerationTask.Status.SUCCESS
+            task.result_image_base64 = image_base64
+            task.attempts = attempts  # ⬅️ сохраняем количество попыток
+            task.save()
+            
+            # Сообщаем о перегенерациях если были
+            if attempts > 1:
+                problems_text = "; ".join(problems_history)
+                Message.objects.create(
+                    chat=chat,
+                    content=f"✅ Генерация завершена после {attempts} попыток. "
+                           f"Проблемы исправлены: {problems_text}",
+                    messageType=MessageType.SYSTEM
+                )
+            else:
+                Message.objects.create(
+                    chat=chat,
+                    content="✅ Генерация завершена с первой попытки!",
+                    messageType=MessageType.SYSTEM
+                )
+            
+            return {
+                "success": True,
+                "task": task,
+                "attempts": attempts,
+                "regeneration_attempts": attempts - 1,  # ⬅️ количество перегенераций
+                "problems": problems_history,
+                "image_base64": image_base64
+            }
+        else:
+            # Фото не прошло проверку
+            task.status = MediaGenerationTask.Status.FAILED
+            task.last_error = f"Проверка не пройдена: {check_result.get('reason', '')}"
+            task.save()
+            
+            # Генерируем исправленный промпт
+            fix_prompt, problems_text = photo_checker.generate_fix_prompt(
+                original_prompt if attempts == 1 else prompt_history.assembled_prompt,
+                check_result
+            )
+            
+            problems_history.append(f"попытка {attempts}: {problems_text}")
+            
+            # Создаем новую историю промпта с исправлениями
+            prompt_history = PromptHistory.objects.create(
+                user=chat.user,
+                prompt_template=prompt_history.prompt_template,
+                parameters=prompt_history.parameters,
+                assembled_prompt=fix_prompt
+            )
+            
+            Message.objects.create(
+                chat=chat,
+                content=f"🔄 Попытка {attempts} не прошла проверку: {problems_text}. "
+                       f"Пробую исправить...",
+                messageType=MessageType.SYSTEM
+            )
+    
+    # Все попытки исчерпаны
+    Message.objects.create(
+        chat=chat,
+        content=f"❌ Не удалось сгенерировать корректное фото после {max_retries} попыток",
+        messageType=MessageType.SYSTEM
+    )
+    
+    return {
+        "success": False,
+        "attempts": attempts,
+        "regeneration_attempts": max(0, attempts - 1),  # ⬅️ даже если не удалось
+        "problems": problems_history,
+        "error": "Превышено количество попыток перегенерации"
+    }
