@@ -1,11 +1,11 @@
 Фото для {platform} в формате {aspect_ratio}.
-Стиль: {visual_style}. Эмоция: {emotion}. Идея: {idea}.
 
-Основной фокус: {composition_focus}. 
-Цветовая гамма: {color_palette}. 
-Ассоциации: {visual_associations}.
+Идея: {idea}
+Стиль: {visual_style}
+Фокус композиции: {composition_focus}
+Цветовая палитра: {color_palette}
+Визуальные ассоциации: {visual_associations}
 
-{event_phrase}
-
+{event_info}
 
 Современно, эстетично, гармонично для {platform}.

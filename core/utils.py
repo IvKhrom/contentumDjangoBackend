@@ -44,19 +44,45 @@ def assemble_prompt_from_template(template_text: str, parameters: dict) -> str:
         def __missing__(self, key):
             return ""
 
+    # Добавляем вычисляемые поля
     params = {k: (v if v is not None else "") for k, v in parameters.items()}
+    
+    # Добавляем event_info на основе event_name и event_genre
+    event_name = params.get('event_name', '').strip()
+    event_genre = params.get('event_genre', '').strip()
+    
+    if event_name and event_genre:
+        params['event_info'] = f"Событие: {event_name} ({event_genre})."
+    elif event_name:
+        params['event_info'] = f"Событие: {event_name}."
+    elif event_genre:
+        params['event_info'] = f"Жанр события: {event_genre}."
+    else:
+        params['event_info'] = ""
+    
+    # Добавляем emotion если нужно (оставляем пустым, т.к. его нет в flow)
+    if 'emotion' not in params:
+        params['emotion'] = ""
+    
     safe = SafeDict(params)
     
     try:
-        return template_text.format_map(safe)
-    except Exception:
+        result = template_text.format_map(safe)
+        # Убираем пустые строки, которые могли остаться от пустых параметров
+        lines = [line.strip() for line in result.split('\n') if line.strip()]
+        return '\n'.join(lines)
+    except Exception as e:
+        # Fallback на старую логику
         result = template_text
         for k, v in params.items():
             result = result.replace("{" + k + "}", str(v))
         for literal_text, field_name, format_spec, conversion in Formatter().parse(result):
             if field_name and "{" + field_name + "}" in result:
                 result = result.replace("{" + field_name + "}", "")
-        return result
+        
+        # Убираем пустые строки
+        lines = [line.strip() for line in result.split('\n') if line.strip()]
+        return '\n'.join(lines)
 
 def enrich_prompt_with_gigachat(short_text):
     """
@@ -139,6 +165,10 @@ def assemble_optimized_prompt(parameters: dict) -> str:
     #    first_line += f", длительность {duration} секунд"
     parts.append(first_line + ".")
     
+    # Идея
+    if parameters.get('idea'):
+        parts.append(f"Идея: {parameters['idea']}.")
+
     # Стиль и эмоции
     style_parts = []
     if parameters.get('visual_style'):
@@ -147,10 +177,6 @@ def assemble_optimized_prompt(parameters: dict) -> str:
     #    style_parts.append(f"Эмоция: {parameters['emotion']}")
     if style_parts:
         parts.append(". ".join(style_parts) + ".")
-    
-    # Идея
-    if parameters.get('idea'):
-        parts.append(f"Идея: {parameters['idea']}.")
     
     # Композиция и визуал
     visual_parts = []
@@ -353,18 +379,29 @@ def handle_user_message_and_advance(chat: Chat, message: Message):
     }
 
 def get_default_prompt_template():
-    """Получение активного шаблона промпта с созданием дефолтного если нет активных"""
+    """Получение активного шаблона промпта"""
     from .models import PromptTemplate
     
     template = PromptTemplate.objects.filter(is_active=True).first()
     
     if not template:
-        # Создаем базовый шаблон если нет активных
+        # Если нет активного шаблона, создаем базовый
         template = PromptTemplate.objects.create(
-            name="Автоматически созданный шаблон",
-            template="Создай {content_type} для {platform}. Идея: {idea}. Эмоция: {emotion}.",
+            name="Базовый шаблон",
+            template="""Фото для {platform} в формате {aspect_ratio}.
+
+Идея: {idea}
+Стиль: {visual_style}
+Фокус композиции: {composition_focus}
+Цветовая палитра: {color_palette}
+Визуальные ассоциации: {visual_associations}
+
+{event_info}
+
+Современно, эстетично, гармонично для {platform}.""",
             is_active=True
         )
+        print("⚠️  Создан базовый шаблон (не найден активный)")
     
     return template
 
@@ -605,4 +642,156 @@ def check_and_regenerate_image(chat, prompt_history, original_prompt, width=1024
         "regeneration_attempts": max(0, attempts - 1),  # ⬅️ даже если не удалось
         "problems": problems_history,
         "error": "Превышено количество попыток перегенерации"
+    }
+
+def generate_image_with_quality_check(user, prompt_history, prompt_text, width=1024, height=1024, max_retries=3):
+    """
+    Генерация изображения с проверкой качества
+    (похожа на check_and_regenerate_image, но для формы)
+    """
+    attempts = 0
+    problems_history = []
+    current_prompt = prompt_text
+    
+    while attempts < max_retries:
+        attempts += 1
+        
+        # Создаем задачу генерации (без привязки к чату)
+        task = MediaGenerationTask.objects.create(
+            user=user,
+            chat=None,
+            prompt_history=prompt_history,
+            prompt_text=current_prompt,
+            status=MediaGenerationTask.Status.PENDING
+        )
+        
+        # Генерируем изображение
+        generation_result = kandinsky_service.generate_image(
+            prompt=current_prompt,
+            width=width,
+            height=height,
+            style="DEFAULT",
+            negative_prompt="низкое качество, размытое, watermark, deformed, distorted, bad anatomy, extra fingers, missing fingers"
+        )
+        
+        if not generation_result["success"]:
+            task.status = MediaGenerationTask.Status.FAILED
+            task.last_error = generation_result["error"]
+            task.save()
+            continue
+        
+        # Получаем сгенерированное изображение
+        images_data = generation_result.get("images_data", [])
+        if not images_data:
+            task.status = MediaGenerationTask.Status.FAILED
+            task.last_error = "Нет данных изображения"
+            task.save()
+            continue
+        
+        image_base64 = images_data[0]
+        
+        # Проверяем фото если включена проверка
+        check_result = photo_checker.check_photo(image_base64)
+        
+        if check_result["passed"]:
+            # Фото прошло проверку
+            task.status = MediaGenerationTask.Status.SUCCESS
+            task.result_image_base64 = image_base64
+            task.attempts = attempts
+            task.save()
+            
+            return {
+                "success": True,
+                "task_id": task.id,
+                "status": "SUCCESS",
+                "attempts": attempts,
+                "regeneration_attempts": attempts - 1,
+                "problems": problems_history,
+                "image_base64": image_base64
+            }
+        else:
+            # Фото не прошло проверку
+            task.status = MediaGenerationTask.Status.FAILED
+            task.last_error = f"Проверка не пройдена: {check_result.get('reason', '')}"
+            task.save()
+            
+            # Генерируем исправленный промпт
+            fix_prompt, problems_text = photo_checker.generate_fix_prompt(
+                current_prompt,
+                check_result
+            )
+            
+            problems_history.append(f"попытка {attempts}: {problems_text}")
+            current_prompt = fix_prompt
+            
+            # Создаем новую историю промпта с исправлениями
+            prompt_history = PromptHistory.objects.create(
+                user=user,
+                prompt_template=prompt_history.prompt_template,
+                parameters=prompt_history.parameters,
+                assembled_prompt=current_prompt
+            )
+    
+    # Все попытки исчерпаны
+    return {
+        "success": False,
+        "task_id": None,
+        "status": "FAILED",
+        "attempts": attempts,
+        "regeneration_attempts": max(0, attempts - 1),
+        "problems": problems_history,
+        "error": "Превышено количество попыток перегенерации"
+    }
+
+def generate_image_without_check(user, prompt_history, prompt_text, width=1024, height=1024):
+    """
+    Генерация изображения без проверки качества
+    """
+    # Создаем задачу генерации
+    task = MediaGenerationTask.objects.create(
+        user=user,
+        chat=None,
+        prompt_history=prompt_history,
+        prompt_text=prompt_text,
+        status=MediaGenerationTask.Status.PENDING
+    )
+    
+    # Генерируем изображение
+    generation_result = kandinsky_service.generate_image(
+        prompt=prompt_text,
+        width=width,
+        height=height,
+        style="DEFAULT",
+        negative_prompt="низкое качество, размытое, watermark"
+    )
+    
+    if generation_result["success"]:
+        images_data = generation_result.get("images_data", [])
+        if images_data:
+            task.status = MediaGenerationTask.Status.SUCCESS
+            task.result_image_base64 = images_data[0]
+            task.attempts = 1
+            task.save()
+            
+            return {
+                "success": True,
+                "task_id": task.id,
+                "status": "SUCCESS",
+                "attempts": 1,
+                "regeneration_attempts": 0,
+                "image_base64": images_data[0]
+            }
+    
+    # Ошибка генерации
+    task.status = MediaGenerationTask.Status.FAILED
+    task.last_error = generation_result.get("error", "Неизвестная ошибка")
+    task.save()
+    
+    return {
+        "success": False,
+        "task_id": task.id,
+        "status": "FAILED",
+        "attempts": 1,
+        "regeneration_attempts": 0,
+        "error": generation_result.get("error", "Неизвестная ошибка")
     }

@@ -4,7 +4,7 @@ from rest_framework_simplejwt.views import TokenRefreshView
 from .views import (
     UserViewSet, ChatViewSet, MessageViewSet, CustomTokenObtainPairView,
     PromptTemplateViewSet, PromptParametersViewSet, PromptActionsViewSet,
-    MediaGenerationTaskViewSet
+    MediaGenerationTaskViewSet, FormGenerationViewSet
 )
 
 router = DefaultRouter()
@@ -15,6 +15,7 @@ router.register(r"prompttemplates", PromptTemplateViewSet, basename="prompttempl
 router.register(r"promptparameters", PromptParametersViewSet, basename="promptparameters")
 router.register(r"promptactions", PromptActionsViewSet, basename="promptactions")
 router.register(r"generation-tasks", MediaGenerationTaskViewSet, basename="generationtask")
+router.register(r"form-generation", FormGenerationViewSet, basename="formgeneration")
 
 urlpatterns = [
     path("", include(router.urls)),

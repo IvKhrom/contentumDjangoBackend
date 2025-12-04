@@ -7,4 +7,9 @@ class CoreConfig(AppConfig):
 
     def ready(self):
         # Импортируем сигналы для автоматической загрузки шаблона
-        import core.signals
+        # Важно: импортируем в ready(), а не в начале файла
+        # чтобы избежать циклических импортов
+        try:
+            import core.signals
+        except ImportError:
+            pass

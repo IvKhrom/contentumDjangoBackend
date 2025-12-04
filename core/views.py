@@ -1,4 +1,3 @@
-# views.py
 from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -13,14 +12,19 @@ from .serializers import (
     UserSerializer, UserRegistrationSerializer, UserUpdateSerializer,
     CustomTokenObtainPairSerializer, ChatSerializer, MessageSerializer,
     ChatCreateSerializer, AdminChatSerializer,
-    PromptTemplateSerializer, PromptParametersSerializer, PromptAssembleSerializer, PromptHistorySerializer, MediaGenerationTaskSerializer
+    PromptTemplateSerializer, PromptParametersSerializer, PromptAssembleSerializer, MediaGenerationTaskSerializer,
+    FormGenerationSerializer, FormGenerationResponseSerializer
 )
 from .utils import (
     assemble_prompt_from_template, simple_semantic_vector_from_params, 
     enrich_prompt_with_gigachat, quality_check_generated, 
     handle_user_message_and_advance, paraphrase_prompt, get_default_prompt_template,
-    get_empty_chat
+    get_empty_chat, optimize_prompt_for_kandinsky, calculate_dimensions,
+    generate_image_with_quality_check, generate_image_without_check
 )
+from . import docs
+from django.http import HttpResponse
+import base64
 
 class StandardResultsSetPagination(PageNumberPagination):
     page_size = 20
@@ -60,6 +64,7 @@ class UserViewSet(viewsets.ModelViewSet):
             return User.objects.all()
         return User.objects.filter(id=user.id)
 
+    @docs.user_create_schema
     def create(self, request, *args, **kwargs):
         serializer = UserRegistrationSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -79,6 +84,7 @@ class UserViewSet(viewsets.ModelViewSet):
             "data": UserSerializer(user).data
         }, status=status.HTTP_201_CREATED)
 
+    @docs.user_me_schema
     @action(detail=False, methods=["get"])
     def me(self, request):
         return Response({
@@ -87,6 +93,7 @@ class UserViewSet(viewsets.ModelViewSet):
             "data": UserSerializer(request.user).data
         })
 
+    @docs.user_summary_schema
     @action(detail=False, methods=["get"])
     def summary(self, request):
         from .utils import get_user_chats_summary
@@ -97,6 +104,7 @@ class UserViewSet(viewsets.ModelViewSet):
             "data": data
         })
 
+    @docs.chat_list_schema
     def list(self, request, *args, **kwargs):
         if request.user.role != UserRole.ADMIN:
             return Response({
@@ -107,6 +115,10 @@ class UserViewSet(viewsets.ModelViewSet):
 
 class CustomTokenObtainPairView(TokenObtainPairView):
     serializer_class = CustomTokenObtainPairSerializer
+
+    @docs.user_login_schema
+    def post(self, request, *args, **kwargs):
+        return super().post(request, *args, **kwargs)
 
 class ChatViewSet(viewsets.ModelViewSet):
     serializer_class = ChatSerializer
@@ -159,6 +171,7 @@ class ChatViewSet(viewsets.ModelViewSet):
             details={"title": instance.title}
         )
 
+    @docs.chat_create_schema
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data, context={"request": request})
         serializer.is_valid(raise_exception=True)
@@ -176,6 +189,11 @@ class ChatViewSet(viewsets.ModelViewSet):
             "data": data
         }, status=status.HTTP_201_CREATED)
 
+    @docs.chat_list_schema
+    def list(self, request, *args, **kwargs):
+        return super().list(request, *args, **kwargs)
+
+    @docs.chat_empty_schema
     @action(detail=False, methods=["get"])
     def empty(self, request):
         """Проверка наличия пустых чатов"""
@@ -196,6 +214,7 @@ class ChatViewSet(viewsets.ModelViewSet):
                 "data": None
             })
 
+    @docs.chat_messages_schema
     @action(detail=True, methods=["get"])
     def messages(self, request, pk=None):
         chat = self.get_object()
@@ -207,6 +226,7 @@ class ChatViewSet(viewsets.ModelViewSet):
             "data": ser.data
         })
     
+    @docs.chat_generation_status_schema
     @action(detail=True, methods=['get'])
     def generation_status(self, request, pk=None):
         """Проверка статуса генерации для чата"""
@@ -236,6 +256,7 @@ class ChatViewSet(viewsets.ModelViewSet):
             }
         })
     
+    @docs.chat_generated_images_schema
     @action(detail=True, methods=['get'])
     def generated_images(self, request, pk=None):
         """Получение всех сгенерированных изображений для чата"""
@@ -296,6 +317,7 @@ class MessageViewSet(viewsets.ModelViewSet):
             details={"chat": str(message.chat.id), "type": message.messageType}
         )
 
+    @docs.message_create_schema
     def create(self, request, *args, **kwargs):
         data = request.data.copy()
         data["messageType"] = data.get("messageType", MessageType.USER)
@@ -402,6 +424,10 @@ class PromptTemplateViewSet(viewsets.ModelViewSet):
         if self.action in ("create", "update", "partial_update", "destroy"):
             return [permissions.IsAuthenticated(), permissions.IsAdminUser()]
         return [permissions.IsAuthenticated()]
+    
+    @docs.prompt_template_list_schema
+    def list(self, request, *args, **kwargs):
+        return super().list(request, *args, **kwargs)
 
 class PromptParametersViewSet(viewsets.ModelViewSet):
     queryset = PromptParameters.objects.all()
@@ -417,6 +443,10 @@ class PromptParametersViewSet(viewsets.ModelViewSet):
         if user.role == UserRole.ADMIN:
             return PromptParameters.objects.all()
         return PromptParameters.objects.filter(user=user)
+    
+    @docs.prompt_parameters_list_schema
+    def list(self, request, *args, **kwargs):
+        return super().list(request, *args, **kwargs)
 
     def perform_create(self, serializer):
         obj = serializer.save(user=self.request.user)
@@ -426,6 +456,7 @@ class PromptParametersViewSet(viewsets.ModelViewSet):
 class PromptActionsViewSet(viewsets.ViewSet):
     permission_classes = [permissions.IsAuthenticated]
 
+    @docs.prompt_assemble_schema
     @action(detail=False, methods=["post"])
     def assemble(self, request):
         ser = PromptAssembleSerializer(data=request.data)
@@ -472,6 +503,7 @@ class PromptActionsViewSet(viewsets.ViewSet):
             }
         })
 
+    @docs.prompt_generate_schema
     @action(detail=False, methods=["post"])
     def generate(self, request):
         payload = request.data
@@ -598,9 +630,7 @@ class PromptActionsViewSet(viewsets.ViewSet):
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
-from django.http import HttpResponse
-import base64
-import re
+
 
 class MediaGenerationTaskViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = MediaGenerationTaskSerializer
@@ -634,6 +664,7 @@ class MediaGenerationTaskViewSet(viewsets.ReadOnlyModelViewSet):
             # Если нет UUID в URL - возвращаем пустой queryset
             return MediaGenerationTask.objects.none()
 
+    @docs.generation_task_image_schema
     @action(detail=True, methods=['get'], url_path='image')
     def image_json(self, request, pk=None):
         """Получение изображения в формате JSON с Base64"""
@@ -658,6 +689,7 @@ class MediaGenerationTaskViewSet(viewsets.ReadOnlyModelViewSet):
             }
         })
 
+    @docs.generation_task_image_file_schema
     @action(detail=True, methods=['get'], url_path='image-file')
     def image_file(self, request, pk=None):
         """Получение изображения как файла для мгновенного показа"""
@@ -686,6 +718,7 @@ class MediaGenerationTaskViewSet(viewsets.ReadOnlyModelViewSet):
                 "message": f"Ошибка декодирования изображения: {str(e)}"
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+    @docs.generation_task_download_schema
     @action(detail=True, methods=['get'], url_path='download')
     def download_image(self, request, pk=None):
         """Скачивание изображения как файла"""
@@ -711,3 +744,154 @@ class MediaGenerationTaskViewSet(viewsets.ReadOnlyModelViewSet):
                 "status": "error",
                 "message": f"Ошибка декодирования изображения: {str(e)}"
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+class FormGenerationViewSet(viewsets.ViewSet):
+    """ViewSet для генерации через форму с полным набором параметров"""
+    permission_classes = [permissions.IsAuthenticated]
+    
+    @docs.form_generation_schema
+    @action(detail=False, methods=['post'])
+    def generate(self, request):
+        """
+        Генерация изображения через форму со всеми параметрами
+        
+        Принимает все параметры формы одним запросом:
+        - Выполняет сборку промпта
+        - Запускает генерацию через Kandinsky
+        - Проверяет качество фото
+        - При необходимости перегенерирует
+        - Возвращает готовое изображение
+        """
+        serializer = FormGenerationSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        params = serializer.validated_data
+        
+        # 1. Собираем промпт
+        prompt_params = {
+            'idea': params['idea'],
+            'event_name': params.get('event_name', ''),
+            'event_genre': params.get('event_genre', ''),
+            'visual_style': params['visual_style'],
+            'composition_focus': params['composition_focus'],
+            'color_palette': params['color_palette'],
+            'visual_associations': params['visual_associations'],
+            'platform': params['platform'],
+            'aspect_ratio': params['aspect_ratio'],
+        }
+        
+       
+        # Используем активный шаблон
+        template = get_default_prompt_template()
+        if not template:
+            return Response({
+                "status": "error",
+                "message": "Нет активного шаблона промпта"
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Собираем промпт
+        assembled_prompt = assemble_prompt_from_template(template.template, prompt_params)
+        assembled_prompt = optimize_prompt_for_kandinsky(assembled_prompt)
+        
+        # 2. Сохраняем историю
+        prompt_history = PromptHistory.objects.create(
+            user=request.user,
+            prompt_template=template,
+            parameters=None,  # Не привязываем к чату
+            assembled_prompt=assembled_prompt
+        )
+        
+        # 3. Рассчитываем размеры
+        width, height = calculate_dimensions(params['aspect_ratio'])
+        
+        # 4. Запускаем генерацию с проверкой
+        enable_check = params.get('enable_photo_check', True)
+        max_retries = params.get('max_regeneration_attempts', 3)
+        
+        if enable_check:
+            # С проверкой качества
+            generation_result = generate_image_with_quality_check(
+                user=request.user,
+                prompt_history=prompt_history,
+                prompt_text=assembled_prompt,
+                width=width,
+                height=height,
+                max_retries=max_retries
+            )
+        else:
+            # Без проверки качества
+            generation_result = generate_image_without_check(
+                user=request.user,
+                prompt_history=prompt_history,
+                prompt_text=assembled_prompt,
+                width=width,
+                height=height
+            )
+        
+        # 5. Создаем ответ
+        base_url = f"http://{request.get_host()}"
+        response_data = {
+            'task_id': generation_result['task_id'],
+            'status': generation_result['status'],
+            'assembled_prompt': assembled_prompt,
+            'generation_attempts': generation_result.get('attempts', 1),
+            'regeneration_attempts': generation_result.get('regeneration_attempts', 0),
+            'problems_fixed': generation_result.get('problems', []),
+            'estimated_time_seconds': 60  # Примерное время
+        }
+        
+        # Добавляем URLs если изображение готово
+        if generation_result['status'] == 'SUCCESS':
+            task_id = generation_result['task_id']
+            response_data.update({
+                'image_url': f"{base_url}/api/generation-tasks/{task_id}/image-file/",
+                'download_url': f"{base_url}/api/generation-tasks/{task_id}/download/",
+            })
+        
+        # Аудит
+        AuditLog.objects.create(
+            user=request.user,
+            action="form_generation",
+            model_name="FormGeneration",
+            object_id=str(generation_result['task_id']),
+            details={
+                'parameters': {k: v for k, v in params.items() if k != 'enable_photo_check'},
+                'result_status': generation_result['status'],
+                'attempts': generation_result.get('attempts', 1)
+            }
+        )
+        
+        return Response({
+            "status": "success",
+            "message": "Генерация запущена",
+            "data": response_data
+        }, status=status.HTTP_201_CREATED)
+    
+    @docs.form_generation_aspect_ratios_schema
+    @action(detail=False, methods=['get'])
+    def available_aspect_ratios(self, request):
+        """Получение списка доступных форматов изображений"""
+        ratios = [
+            {"value": "9:16", "label": "Вертикальный 9:16 (Instagram Stories)", "width": 768, "height": 1365},
+            {"value": "16:9", "label": "Горизонтальный 16:9 (YouTube, Desktop)", "width": 1920, "height": 1080},
+            {"value": "1:1", "label": "Квадрат 1:1 (Instagram Post)", "width": 1024, "height": 1024},
+            {"value": "4:5", "label": "Портрет 4:5 (Facebook/Instagram)", "width": 1080, "height": 1350},
+            {"value": "2:3", "label": "Портрет 2:3 (Печать, Постер)", "width": 1200, "height": 1800},
+        ]
+        return Response({
+            "status": "success",
+            "data": ratios
+        })
+    
+    @docs.form_generation_visual_styles_schema
+    @action(detail=False, methods=['get'])
+    def default_visual_styles(self, request):
+        """Получение списка популярных стилей"""
+        styles = [
+            "реализм", "минимализм", "арт-деко", "неон", "сюрреализм", 
+            "кинематографичный", "живописный", "цифровой арт", "граффити",
+            "аниме", "пиксель арт", "3D рендер", "акварель", "масляная живопись"
+        ]
+        return Response({
+            "status": "success",
+            "data": styles
+        })

@@ -193,3 +193,48 @@ class MediaGenerationTaskSerializer(serializers.ModelSerializer):
             "attempts", "last_error", "createdAt", "updatedAt"
         ]
         read_only_fields = ["id", "user", "createdAt", "updatedAt"]
+
+class FormGenerationSerializer(serializers.Serializer):
+    """Сериализатор для формы с полным набором параметров"""
+    
+    # Основные параметры (из flow - 9 вопросов)
+    idea = serializers.CharField(required=True, max_length=500)
+    event_name = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=200)
+    event_genre = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=100)
+    visual_style = serializers.CharField(required=True, max_length=100)
+    composition_focus = serializers.CharField(required=True, max_length=100)
+    color_palette = serializers.CharField(required=True, max_length=100)
+    visual_associations = serializers.CharField(required=True, max_length=500)
+    platform = serializers.CharField(required=True, max_length=50)
+    aspect_ratio = serializers.CharField(required=False, max_length=10)
+    
+    # Настройки генерации
+    enable_photo_check = serializers.BooleanField(default=True)
+    max_regeneration_attempts = serializers.IntegerField(default=3, min_value=1, max_value=10)
+    
+    def validate_aspect_ratio(self, value):
+        if value is None:
+            return "1:1"
+        
+        valid_ratios = ["9:16", "16:9", "1:1", "4:5", "2:3"]
+        if value not in valid_ratios:
+            raise serializers.ValidationError(f"Допустимые форматы: {', '.join(valid_ratios)}")
+        return value
+    
+    def validate(self, attrs):
+        # Устанавливаем aspect_ratio по умолчанию если не указан
+        if 'aspect_ratio' not in attrs or attrs['aspect_ratio'] is None:
+            attrs['aspect_ratio'] = "1:1"
+        return attrs
+
+class FormGenerationResponseSerializer(serializers.Serializer):
+    """Сериализатор ответа для формы генерации"""
+    task_id = serializers.UUIDField()
+    status = serializers.CharField()
+    assembled_prompt = serializers.CharField()
+    image_url = serializers.CharField(required=False)
+    download_url = serializers.CharField(required=False)
+    generation_attempts = serializers.IntegerField()
+    regeneration_attempts = serializers.IntegerField()
+    problems_fixed = serializers.ListField(child=serializers.CharField(), required=False)
+    estimated_time_seconds = serializers.IntegerField()
