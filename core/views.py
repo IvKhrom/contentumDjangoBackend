@@ -25,6 +25,7 @@ from .utils import (
 from . import docs
 from django.http import HttpResponse
 import base64
+import json
 
 class StandardResultsSetPagination(PageNumberPagination):
     page_size = 20
@@ -259,31 +260,47 @@ class ChatViewSet(viewsets.ModelViewSet):
     @docs.chat_generated_images_schema
     @action(detail=True, methods=['get'])
     def generated_images(self, request, pk=None):
-        """Получение всех сгенерированных изображений для чата"""
+        """Получение всех успешно сгенерированных изображений для чата"""
         chat = self.get_object()
         
-        tasks = MediaGenerationTask.objects.filter(
-            chat=chat, 
-            status=MediaGenerationTask.Status.SUCCESS
-        ).order_by('-createdAt')
-        
-        images_data = []
-        for task in tasks:
-            if task.result_image_base64:
-                images_data.append({
-                    "task_id": str(task.id),
-                    "prompt": task.prompt_text,
-                    "created_at": task.createdAt,
-                    "image_url": f"/api/generation-tasks/{task.id}/image/",
-                    "download_url": f"/api/generation-tasks/{task.id}/image/?format=file"
-                })
-        
+        # Находим все сообщения с изображениями в этом чате
+        image_messages = []
+        for message in chat.messages.order_by('createdAt'):
+            if message.is_image_message():
+                image_data = message.get_content_dict()
+                if image_data.get("type") == "image":
+                    image_content = image_data.get("info", {})
+                    task_id = image_content.get("task_id")
+                    
+                    if task_id:
+                        # Пытаемся получить задачу для дополнительной информации
+                        try:
+                            task = MediaGenerationTask.objects.get(id=task_id)
+                            image_messages.append({
+                                "message_id": str(message.id),
+                                "created_at": message.createdAt,
+                                "data": {
+                                    "task_id": task_id,
+                                    "prompt": image_content.get("prompt", task.prompt_text),
+                                    "image_url": image_content.get("image_url", f"/api/generation-tasks/{task_id}/image-file/"),
+                                    "download_url": image_content.get("download_url", f"/api/generation-tasks/{task_id}/download/"),
+                                    "message_type": "image"
+                                }
+                            })
+                        except MediaGenerationTask.DoesNotExist:
+                            # Задача не найдена, но данные из сообщения есть
+                            image_messages.append({
+                                "message_id": str(message.id),
+                                "created_at": message.createdAt,
+                                "data": image_content
+                            })
+            
         return Response({
             "status": "success",
             "data": {
                 "chat_id": str(chat.id),
-                "images_count": len(images_data),
-                "images": images_data
+                "images_count": len(image_messages),
+                "images": image_messages
             }
         })
 
@@ -321,7 +338,33 @@ class MessageViewSet(viewsets.ModelViewSet):
     def create(self, request, *args, **kwargs):
         data = request.data.copy()
         data["messageType"] = data.get("messageType", MessageType.USER)
+        
+        # Получаем content из запроса
+        content = data.get("content", "")
+        print(content)
+        
+        # Если content пришел как строка (простой текст), оборачиваем в структуру
+        if isinstance(content, str):
+            data["content"] = {
+                "type": "text",
+                "info": content
+            }
+        elif isinstance(content, dict) and 'info' not in content:
+            # Если dict, но нет поля info - нормализуем
+            if 'content' in content:
+                data["content"] = {
+                    "type": content.get('type', 'text'),
+                    "info": content['content']
+                }
+            else:
+                data["content"] = {
+                    "type": content.get('type', 'text'),
+                    "info": str(content)
+                }
+        print(data)
         serializer = self.get_serializer(data=data)
+
+        print(serializer.is_valid())
         serializer.is_valid(raise_exception=True)
         msg = serializer.save()
 
@@ -343,71 +386,80 @@ class MessageViewSet(viewsets.ModelViewSet):
             elif result["type"] == "completed":
                 pp = result.get("prompt_parameters")
                 ph = result.get("prompt_history")
-                generation_result = result.get("generation_result", {})  # ⬅️ получаем результат
+                generation_result = result.get("generation_result", {})
                 
-                # Получаем задачу генерации
+                # Получаем задачу генерации (только успешную)
                 task = MediaGenerationTask.objects.filter(
                     prompt_history=ph, 
-                    chat=msg.chat
+                    chat=msg.chat,
+                    status=MediaGenerationTask.Status.SUCCESS
                 ).order_by('-createdAt').first()
                 
                 base_url = f"http://{request.get_host()}"
                 
                 if task and task.result_image_base64:
-                    # Получаем информацию о перегенерациях из generation_result
-                    regeneration_attempts = generation_result.get("regeneration_attempts", 0)
-                    total_attempts = generation_result.get("attempts", 1)
+                    # Создаем сообщение с типом IMAGE
+                    image_message_content = json.dumps({
+                        "type": "image",
+                        "info": {
+                            "task_id": str(task.id),
+                            "prompt": task.prompt_text,
+                            "image_url": f"{base_url}/api/generation-tasks/{task.id}/image-file/",
+                            "download_url": f"{base_url}/api/generation-tasks/{task.id}/download/",
+                            "regeneration_attempts": generation_result.get("regeneration_attempts", 0),
+                            "total_attempts": generation_result.get("attempts", 1)
+                        }
+                    }, ensure_ascii=False)
                     
-                    # ✅ ФОТО ГОТОВО - ВОЗВРАЩАЕМ ССЫЛКИ
-                    response_data = {
-                        "prompt_parameters_id": str(pp.id) if pp else None, 
-                        "prompt_history_id": str(ph.id) if ph else None,
-                        "assembled_prompt": ph.assembled_prompt if ph else None,
-                        "generation_task_id": str(task.id) if task else None,
-                        "instant_image_url": f"{base_url}/api/generation-tasks/{task.id}/image-file/",
-                        "download_url": f"{base_url}/api/generation-tasks/{task.id}/download/",
-                        "status": "completed",
-                        "message": "✅ Генерация завершена! Ваше фото готово.",
-                        "regeneration_attempts": regeneration_attempts,  # ⬅️ из generation_result
-                        "total_attempts": total_attempts  # ⬅️ общее количество попыток
-                    }
-                    
-                    # Обновляем сообщение если были перегенерации
-                    if regeneration_attempts > 0:
-                        problems = generation_result.get("problems", [])
-                        problems_text = ", ".join([p.split(": ", 1)[-1] for p in problems[-3:]]) if problems else "технические проблемы"
-                        response_data["message"] = f"✅ Генерация завершена после {regeneration_attempts} перегенераций (исправлено: {problems_text})"
+                    # Создаем SYSTEM сообщение с изображением
+                    image_msg = Message.objects.create(
+                        chat=msg.chat,
+                        content=image_message_content,  # Это уже JSON строка
+                        messageType=MessageType.SYSTEM
+                    )
                     
                     return Response({
                         "status": "success", 
                         "message": "Flow завершён, изображение сгенерировано", 
-                        "data": response_data
+                        "data": {
+                            "user_message": MessageSerializer(msg).data,
+                            "system_message": MessageSerializer(image_msg).data,
+                            "prompt_parameters_id": str(pp.id) if pp else None,
+                            "prompt_history_id": str(ph.id) if ph else None,
+                        }
                     }, status=status.HTTP_201_CREATED)
                 else:
-                    # Если изображение еще не готово
-                    regeneration_attempts = generation_result.get("regeneration_attempts", 0)
-                    total_attempts = generation_result.get("attempts", 1)
+                    # Если изображение еще не готово, создаем сообщение о процессе
+                    processing_content = {
+                        "type": "text",
+                        "info": "🔄 Генерация изображения в процессе..."
+                    }
+                    
+                    processing_msg = Message.objects.create(
+                        chat=msg.chat,
+                        content=processing_content,
+                        messageType=MessageType.SYSTEM
+                    )
                     
                     return Response({
                         "status": "success", 
                         "message": "Flow завершён, генерация запущена", 
                         "data": {
+                            "user_message": MessageSerializer(msg).data,
+                            "system_message": MessageSerializer(processing_msg).data,
                             "prompt_parameters_id": str(pp.id) if pp else None,
                             "prompt_history_id": str(ph.id) if ph else None,
-                            "assembled_prompt": ph.assembled_prompt if ph else None,
                             "generation_task_id": str(task.id) if task else None,
-                            "regeneration_attempts": regeneration_attempts,
-                            "total_attempts": total_attempts,
-                            "status": "generating",
-                            "message": f"🔄 Генерация изображения в процессе... (попыток: {total_attempts})"
+                            "status": "generating"
                         }
                     }, status=status.HTTP_201_CREATED)
-                
+        
         return Response({
             "status": "success", 
             "message": "Сообщение отправлено", 
             "data": MessageSerializer(msg).data
         }, status=status.HTTP_201_CREATED)
+
 
     @action(detail=False, methods=["get"])
     def recent(self, request):

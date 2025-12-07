@@ -1,4 +1,5 @@
 # serializers.py
+import json
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from django.core.exceptions import ValidationError
@@ -70,6 +71,76 @@ class MessageSerializer(serializers.ModelSerializer):
         fields = ["id", "chat", "content", "messageType", "createdAt"]
         read_only_fields = ["id", "createdAt"]
 
+    def to_representation(self, instance):
+        """Преобразуем сохраненный JSON в читаемый формат"""
+        data = super().to_representation(instance)
+        
+        # Всегда пытаемся парсить JSON
+        try:
+            import json
+            content_data = json.loads(data['content'])
+            
+            # Если парсинг успешен, используем результат
+            if isinstance(content_data, dict):
+                data['content'] = content_data
+            elif isinstance(content_data, str):
+                # Если это строка, оборачиваем в структуру
+                data['content'] = {
+                    "type": "text",
+                    "info": content_data
+                }
+        except (json.JSONDecodeError, TypeError):
+            # Если не JSON, оборачиваем строку в структуру
+            data['content'] = {
+                "type": "text",
+                "info": data['content']
+            }
+        
+        return data
+
+    def to_internal_value(self, data):
+        """Сохраняем данные в правильном формате"""
+        # Делаем копию данных
+        data_copy = data.copy()
+        
+        # Обрабатываем content отдельно
+        content = data_copy.get('content', '')
+        
+        if isinstance(content, dict):
+            # Если пришел dict, сериализуем в JSON
+            import json
+            data_copy['content'] = json.dumps(content, ensure_ascii=False)
+        elif isinstance(content, str):
+            # Если пришла строка, создаем структуру
+            import json
+            data_copy['content'] = json.dumps({
+                "type": "text",
+                "info": content
+            }, ensure_ascii=False)
+        elif content is None:
+            data_copy['content'] = ''
+        
+        # Теперь вызываем родительский метод с преобразованными данными
+        return super().to_internal_value(data_copy)
+    
+    def validate_content(self, value):
+        """Валидация контента"""
+        # Здесь value уже будет строкой после to_internal_value
+        # Но нужно убедиться, что это не пустая строка
+        if not value or not value.strip():
+            raise serializers.ValidationError("Content не может быть пустым")
+        
+        # Проверяем, что это валидный JSON (если мы его создали)
+        try:
+            import json
+            json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            # Если не JSON, это нормально - это может быть просто строка
+            pass
+            
+        return value
+    
+    
 class ChatSerializer(serializers.ModelSerializer):
     messages = MessageSerializer(many=True, read_only=True)
     messageCount = serializers.SerializerMethodField()

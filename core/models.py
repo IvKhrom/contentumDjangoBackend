@@ -92,6 +92,26 @@ class Message(models.Model):
     
     def __str__(self):
         return f"{self.messageType}: {self.content[:50]}..."
+    
+    def get_content_dict(self):
+        """Возвращает content как dict если это возможно"""
+        import json
+        try:
+            return json.loads(self.content)
+        except (json.JSONDecodeError, TypeError):
+            return {"type": "text", "info": self.content}
+    
+    def is_image_message(self):
+        """Проверяет, является ли сообщение изображением"""
+        content = self.get_content_dict()
+        return content.get('type') == 'image'
+    
+    def get_image_info(self):
+        """Возвращает информацию об изображении если это image сообщение"""
+        if self.is_image_message():
+            content = self.get_content_dict()
+            return content.get('info', {})
+        return None
 
 class PromptTemplate(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

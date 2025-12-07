@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+import json
 from django.core.serializers.json import DjangoJSONEncoder
 from .models import Message, Chat, PromptParameters, PromptHistory, MessageType
 from string import Formatter
@@ -139,9 +140,10 @@ def build_parameters_from_chat_messages(chat: Chat) -> dict:
     
     for idx, (key, _, optional) in enumerate(QUESTIONS_FLOW):
         if idx < len(user_msgs):
-            content = user_msgs[idx].content.strip()
-            if content:  # Не сохраняем пустые ответы для опциональных полей
-                params[key] = content
+            content_value = extract_text_from_content(user_msgs[idx].content)
+            
+            if content_value and content_value != "None":
+                params[key] = content_value
         elif not optional:
             # Для обязательных полей без ответа ставим пустую строку
             params[key] = ""
@@ -149,51 +151,66 @@ def build_parameters_from_chat_messages(chat: Chat) -> dict:
     return params
 
 def assemble_optimized_prompt(parameters: dict) -> str:
+    # Очищаем параметры от JSON структур
+    clean_params = {}
+    for key, value in parameters.items():
+        if isinstance(value, str):
+            # Пытаемся распарсить JSON
+            try:
+                import json
+                parsed = json.loads(value)
+                if isinstance(parsed, dict):
+                    # Если это dict, ищем поле info
+                    if 'info' in parsed and isinstance(parsed['info'], str):
+                        clean_params[key] = parsed['info']
+                    else:
+                        # Иначе используем весь dict как строку
+                        clean_params[key] = str(parsed)
+                else:
+                    clean_params[key] = str(parsed)
+            except (json.JSONDecodeError, TypeError):
+                clean_params[key] = value
+        else:
+            clean_params[key] = str(value) if value is not None else ""
+    
+    # Теперь используем очищенные параметры
+    params = clean_params
+    
     parts = []
     
     # Базовая информация
-    #content_type = parameters.get('content_type', 'контент')
-    platform = parameters.get('platform', '')
-    aspect_ratio = parameters.get('aspect_ratio', '1:1')
-    #duration = parameters.get('duration', '')
+    platform = params.get('platform', '')
+    aspect_ratio = params.get('aspect_ratio', '1:1')
     
     # Первая строка
     first_line = f"Фото для {platform}" if platform else "Фото"
     if aspect_ratio:
         first_line += f" в формате {aspect_ratio}"
-    #if duration and content_type == 'видео':
-    #    first_line += f", длительность {duration} секунд"
     parts.append(first_line + ".")
     
     # Идея
-    if parameters.get('idea'):
-        parts.append(f"Идея: {parameters['idea']}.")
+    if params.get('idea'):
+        parts.append(f"Идея: {params['idea']}.")
 
-    # Стиль и эмоции
-    style_parts = []
-    if parameters.get('visual_style'):
-        style_parts.append(f"Стиль: {parameters['visual_style']}")
-    #if parameters.get('emotion'):
-    #    style_parts.append(f"Эмоция: {parameters['emotion']}")
-    if style_parts:
-        parts.append(". ".join(style_parts) + ".")
+    # Стиль
+    if params.get('visual_style'):
+        parts.append(f"Стиль: {params['visual_style']}.")
     
     # Композиция и визуал
     visual_parts = []
-    if parameters.get('composition_focus'):
-        visual_parts.append(f"Фокус на {parameters['composition_focus']}")
-    if parameters.get('color_palette'):
-        visual_parts.append(f"Цвета: {parameters['color_palette']}")
-    if parameters.get('visual_associations'):
-        visual_parts.append(f"Ассоциации: {parameters['visual_associations']}")
+    if params.get('composition_focus'):
+        visual_parts.append(f"Фокус на {params['composition_focus']}")
+    if params.get('color_palette'):
+        visual_parts.append(f"Цвета: {params['color_palette']}")
+    if params.get('visual_associations'):
+        visual_parts.append(f"Ассоциации: {params['visual_associations']}")
     
     if visual_parts:
         parts.append(" ".join(visual_parts) + ".")
     
     # Событие (только если указано)
-    event_name = parameters.get('event_name', '').strip()
-    event_genre = parameters.get('event_genre', '').strip()
-    #event_description = parameters.get('event_description', '').strip()
+    event_name = params.get('event_name', '').strip()
+    event_genre = params.get('event_genre', '').strip()
     
     if event_name or event_genre:
         event_parts = []
@@ -201,20 +218,8 @@ def assemble_optimized_prompt(parameters: dict) -> str:
             event_parts.append(f"Событие: {event_name}")
         if event_genre:
             event_parts.append(f"Жанр: {event_genre}")
-        #if event_description:
-        #    event_parts.append(f"Описание: {event_description}")
         
         parts.append(" | ".join(event_parts) + ".")
-
-    # Слоган (только если указан)
-    #slogan = parameters.get('slogan', '').strip()
-    #text_style = parameters.get('text_style', '').strip()
-    
-    #if slogan:
-    #    slogan_phrase = f'Текст: "{slogan}"'
-    #    if text_style:
-    #        slogan_phrase += f" в стиле {text_style}"
-    #    parts.append(slogan_phrase + ".")
     
     # Финальная строка
     if platform:
@@ -266,9 +271,13 @@ def complete_chat_and_generate(chat, prompt_history):
     width, height = calculate_dimensions(aspect_ratio)
         
     # Отправляем системное сообщение с информацией о размерах
+    import json
     Message.objects.create(
         chat=chat,
-        content=f"🎨 Запускаю генерацию изображения ({width}x{height}) с автоматической проверкой качества...",
+        content=json.dumps({
+            "type": "text",
+            "info": f"🎨 Запускаю генерацию изображения ({width}x{height}) с автоматической проверкой качества..."
+        }, ensure_ascii=False),
         messageType=MessageType.SYSTEM
     )
     
@@ -301,7 +310,10 @@ def complete_chat_and_generate(chat, prompt_history):
         
         Message.objects.create(
             chat=chat,
-            content=preview_msg,
+            content=json.dumps({
+                "type": "text",
+                "info": preview_msg
+            }, ensure_ascii=False),
             messageType=MessageType.SYSTEM
         )
        
@@ -327,6 +339,14 @@ def handle_user_message_and_advance(chat: Chat, message: Message):
     """
     from django.utils import timezone
     
+    # Получаем оригинальный текст из content
+    try:
+        import json
+        content_data = json.loads(message.content)
+        original_text = content_data.get('info', content_data.get('content', ''))
+    except (json.JSONDecodeError, TypeError):
+        original_text = message.content
+    
     # Увеличиваем шаг
     chat.flow_step = (chat.flow_step or 0) + 1
     chat.updatedAt = timezone.now()
@@ -335,16 +355,26 @@ def handle_user_message_and_advance(chat: Chat, message: Message):
     # Проверяем, есть ли следующий вопрос
     next_key, next_text, optional = next_question_for_chat(chat)
     if next_text:
-        # Создаем системное сообщение со следующим вопросом
+        # Создаем системное сообщение со следующим вопросом в новом формате
         sys_msg = Message.objects.create(
             chat=chat, 
-            content=next_text, 
+            content=json.dumps({
+                "type": "text",
+                "info": next_text
+            }, ensure_ascii=False), 
             messageType=MessageType.SYSTEM
         )
         return {"type": "question", "message": sys_msg}
 
     # Flow завершён — собираем параметры
     params = build_parameters_from_chat_messages(chat)
+    
+    # ВОТ ОСНОВНАЯ ПРОБЛЕМА - обновляем последний параметр
+    # Нужно добавить последний ответ пользователя в params
+    step = (chat.flow_step or 0) - 1
+    if step < len(QUESTIONS_FLOW):
+        key = QUESTIONS_FLOW[step][0]
+        params[key] = original_text
     
     # Сохраняем параметры
     pp = PromptParameters.objects.create(
@@ -356,26 +386,25 @@ def handle_user_message_and_advance(chat: Chat, message: Message):
     # СОБИРАЕМ ОПТИМИЗИРОВАННЫЙ ПРОМПТ
     assembled_prompt = assemble_optimized_prompt(params)
     
-    # Получаем шаблон для истории (но не используем его для генерации)
+    # Получаем шаблон для истории
     template = get_default_prompt_template()
     
     ph = PromptHistory.objects.create(
         user=chat.user, 
         prompt_template=template,
         parameters=pp, 
- 
         assembled_prompt=assembled_prompt
     )
     
-    # ЗАПУСКАЕМ ГЕНЕРАЦИЮ АВТОМАТИЧЕСКИ
+    # Запускаем генерацию
     generation_result = complete_chat_and_generate(chat, ph)
     
-    # ВОЗВРАЩАЕМ ДАННЫЕ С ИНФОРМАЦИЕЙ О ПЕРЕГЕНЕРАЦИЯХ
+    # Возвращаем данные для дальнейшей обработки в view
     return {
         "type": "completed", 
         "prompt_parameters": pp, 
         "prompt_history": ph,
-        "generation_result": generation_result  # ⬅️ добавляем полный результат
+        "generation_result": generation_result
     }
 
 def get_default_prompt_template():
@@ -517,51 +546,30 @@ def paraphrase_prompt(prompt_text):
 def check_and_regenerate_image(chat, prompt_history, original_prompt, width=1024, height=1024, max_retries=3):
     """
     Проверяет сгенерированное фото и при необходимости перегенерирует
+    Сохраняет только задачи со статусом SUCCESS
     """
     attempts = 0
     problems_history = []
     
-    print(f"🔧 UTILS DEBUG: Generating image with dimensions: {width}x{height}")
-    
     while attempts < max_retries:
         attempts += 1
         
-        # Создаем задачу генерации
-        task = MediaGenerationTask.objects.create(
-            user=chat.user,
-            chat=chat,
-            prompt_history=prompt_history,
-            prompt_text=original_prompt if attempts == 1 else prompt_history.assembled_prompt,
-            status=MediaGenerationTask.Status.PENDING
-        )
+        current_prompt = original_prompt if attempts == 1 else prompt_history.assembled_prompt
         
-        # Генерируем изображение с правильными размерами
+        # Генерируем изображение
         generation_result = kandinsky_service.generate_image(
-            prompt=original_prompt if attempts == 1 else prompt_history.assembled_prompt,
+            prompt=current_prompt,
             width=width,
-            height=height,  # ⬅️ используем переданные размеры
+            height=height,
             style="DEFAULT",
             negative_prompt="низкое качество, размытое, watermark, deformed, distorted, bad anatomy, extra fingers, missing fingers"
         )
         
         if not generation_result["success"]:
-            task.status = MediaGenerationTask.Status.FAILED
-            task.last_error = generation_result["error"]
-            task.save()
-            
-            Message.objects.create(
-                chat=chat,
-                content=f"❌ Ошибка при генерации (попытка {attempts}): {generation_result['error']}",
-                messageType=MessageType.SYSTEM
-            )
             continue
         
-        # Получаем сгенерированное изображение
         images_data = generation_result.get("images_data", [])
         if not images_data:
-            task.status = MediaGenerationTask.Status.FAILED
-            task.last_error = "Нет данных изображения"
-            task.save()
             continue
         
         image_base64 = images_data[0]
@@ -570,49 +578,42 @@ def check_and_regenerate_image(chat, prompt_history, original_prompt, width=1024
         check_result = photo_checker.check_photo(image_base64)
         
         if check_result["passed"]:
-            # Фото прошло проверку
-            task.status = MediaGenerationTask.Status.SUCCESS
-            task.result_image_base64 = image_base64
-            task.attempts = attempts  # ⬅️ сохраняем количество попыток
-            task.save()
+            # Фото прошло проверку - сохраняем в БД
+            task = MediaGenerationTask.objects.create(
+                user=chat.user,
+                chat=chat,
+                prompt_history=prompt_history,
+                prompt_text=current_prompt,
+                status=MediaGenerationTask.Status.SUCCESS,
+                result_image_base64=image_base64,
+                attempts=attempts
+            )
             
-            # Сообщаем о перегенерациях если были
-            if attempts > 1:
-                problems_text = "; ".join(problems_history)
-                Message.objects.create(
-                    chat=chat,
-                    content=f"✅ Генерация завершена после {attempts} попыток. "
-                           f"Проблемы исправлены: {problems_text}",
-                    messageType=MessageType.SYSTEM
-                )
-            else:
-                Message.objects.create(
-                    chat=chat,
-                    content="✅ Генерация завершена с первой попытки!",
-                    messageType=MessageType.SYSTEM
-                )
+            # Удаляем все FAILED задачи для этого чата и промпта
+            MediaGenerationTask.objects.filter(
+                chat=chat,
+                prompt_history=prompt_history,
+                status=MediaGenerationTask.Status.FAILED
+            ).delete()
             
             return {
                 "success": True,
                 "task": task,
                 "attempts": attempts,
-                "regeneration_attempts": attempts - 1,  # ⬅️ количество перегенераций
+                "regeneration_attempts": attempts - 1,
                 "problems": problems_history,
                 "image_base64": image_base64
             }
         else:
-            # Фото не прошло проверку
-            task.status = MediaGenerationTask.Status.FAILED
-            task.last_error = f"Проверка не пройдена: {check_result.get('reason', '')}"
-            task.save()
+            # Фото не прошло проверку - не сохраняем в БД
+            reason = check_result.get('reason', 'проверка не пройдена')
+            problems_history.append(f"попытка {attempts}: {reason}")
             
             # Генерируем исправленный промпт
             fix_prompt, problems_text = photo_checker.generate_fix_prompt(
-                original_prompt if attempts == 1 else prompt_history.assembled_prompt,
+                current_prompt,
                 check_result
             )
-            
-            problems_history.append(f"попытка {attempts}: {problems_text}")
             
             # Создаем новую историю промпта с исправлениями
             prompt_history = PromptHistory.objects.create(
@@ -621,25 +622,12 @@ def check_and_regenerate_image(chat, prompt_history, original_prompt, width=1024
                 parameters=prompt_history.parameters,
                 assembled_prompt=fix_prompt
             )
-            
-            Message.objects.create(
-                chat=chat,
-                content=f"🔄 Попытка {attempts} не прошла проверку: {problems_text}. "
-                       f"Пробую исправить...",
-                messageType=MessageType.SYSTEM
-            )
     
     # Все попытки исчерпаны
-    Message.objects.create(
-        chat=chat,
-        content=f"❌ Не удалось сгенерировать корректное фото после {max_retries} попыток",
-        messageType=MessageType.SYSTEM
-    )
-    
     return {
         "success": False,
         "attempts": attempts,
-        "regeneration_attempts": max(0, attempts - 1),  # ⬅️ даже если не удалось
+        "regeneration_attempts": max(0, attempts - 1),
         "problems": problems_history,
         "error": "Превышено количество попыток перегенерации"
     }
@@ -795,3 +783,32 @@ def generate_image_without_check(user, prompt_history, prompt_text, width=1024, 
         "regeneration_attempts": 0,
         "error": generation_result.get("error", "Неизвестная ошибка")
     }
+
+def extract_text_from_content(content_str):
+    """
+    Извлекает текст из content (поддерживает оба формата)
+    """
+    import json
+    
+    try:
+        content_data = json.loads(content_str)
+        
+        # Если это новая структура с type/info
+        if isinstance(content_data, dict):
+            if 'info' in content_data:
+                info = content_data['info']
+                if isinstance(info, str):
+                    return info.strip()
+                elif isinstance(info, dict):
+                    # Для изображений возвращаем промпт или что есть
+                    return info.get('prompt', str(info))
+                else:
+                    return str(info)
+            else:
+                return str(content_data)
+        else:
+            return str(content_data)
+    except (json.JSONDecodeError, TypeError):
+        return content_str.strip()
+    
+    return ""
